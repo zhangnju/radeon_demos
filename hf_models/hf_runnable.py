@@ -24,7 +24,7 @@ MAX_VRAM_BYTES = int(TOTAL_VRAM_GB * (1024 ** 3) * VRAM_RATIO)   # ~86.4 GB
 BF16_BYTES     = 2            # bf16: 2 bytes / param
 MAX_PARAMS     = MAX_VRAM_BYTES // BF16_BYTES                     # ~46.4B 参数上限
 
-# ── 黑名单（已有 / 无需重复） ──────────────────────────────────────────────────
+# ── 核心模型（已有 / 不在新增候选列表中） ─────────────────────────────────────
 
 EXCLUDED = {
     "Qwen/Qwen3.6-27B",
@@ -280,7 +280,7 @@ for i, m in enumerate(qualified, 1):
 print(f"参数量上限 (BF16, {VRAM_RATIO*100:.0f}% VRAM): {fmt_params(MAX_PARAMS)}"
       f"  ({MAX_VRAM_BYTES/(1024**3):.1f} GB)")
 print(f"{'─'*50}")
-print(f"  已排除（黑名单）:           {cnt_excluded}")
+print(f"  已跳过（核心模型/关键词）:  {cnt_excluded}")
 print(f"  非 Transformers 兼容:      {cnt_not_tf}")
 print(f"  发布时间过早（<2025-01）:  {cnt_too_old}")
 print(f"  显存不足（>96G BF16）:     {cnt_large}")
@@ -347,15 +347,15 @@ with open("hf_runnable.md", "w", encoding="utf-8") as f:
     f.write(f"| 发布时间 | 2025-01-01 之后 |\n")
     f.write(f"| 排序 | trendingScore 降序 |\n\n")
     f.write(f"## 统计\n\n")
-    f.write(f"- 已排除（黑名单 / 量化 / 小机构 finetune）：{cnt_excluded}\n")
+    f.write(f"- 已跳过（核心模型 / 量化 / 小机构 finetune）：{cnt_excluded}\n")
     f.write(f"- 非 Transformers / ROCm 兼容：{cnt_not_tf}\n")
     f.write(f"- 发布时间过早：{cnt_too_old}\n")
     f.write(f"- 显存不足：{cnt_large}\n")
     f.write(f"- 参数量未知：{cnt_unknown}\n")
     f.write(f"- **可运行模型：{len(qualified)}**\n\n")
     f.write(f"## 模型列表\n\n")
-    f.write(f"| # | 模型 | 参数量 | BF16显存 | Trending | 任务类型 | 发布日期 |\n")
-    f.write(f"|---|------|--------|----------|----------|----------|----------|\n")
+    f.write(f"| # | 模型 | 参数量 | BF16显存 | Trending | Likes | Downloads | 任务类型 | 发布日期 |\n")
+    f.write(f"|---|------|--------|----------|----------|-------|-----------|----------|----------|\n")
     for m in qualified:
         hf_url = f"https://huggingface.co/{m['id']}"
         f.write(
@@ -364,9 +364,20 @@ with open("hf_runnable.md", "w", encoding="utf-8") as f:
             f"| {m['params_fmt']} "
             f"| {m['vram_gb']}GB "
             f"| {m['trendingScore']:.2f} "
+            f"| {m['likes']:,} "
+            f"| {m['downloads']:,} "
             f"| {m['pipeline_tag']} "
             f"| {m['createdAt']} |\n"
         )
+
+    f.write(f"\n---\n\n## 核心模型\n\n")
+    f.write(f"以下模型已纳入核心部署，不在新增候选列表中。\n\n")
+    f.write(f"| # | 模型 | HuggingFace 链接 |\n")
+    f.write(f"|---|------|------------------|\n")
+    excluded_list = sorted(EXCLUDED)
+    for i, mid in enumerate(excluded_list, 1):
+        hf_url = f"https://huggingface.co/{mid}"
+        f.write(f"| {i} | `{mid}` | {hf_url} |\n")
 
 print(f"\n输出文件：")
 print(f"  hf_runnable.json  — 完整数据（含配置）")

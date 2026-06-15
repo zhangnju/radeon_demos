@@ -138,7 +138,7 @@ with precise lip movements perfectly synchronized to their speech.
 
 ## GPU 显存要求
 
-推理约需 **20GB GPU 显存**（已在 RTX 4090 / A800 / H800 上测试）。
+推理约需 **20GB GPU 显存**（已在 AMD R9700/w7900 测试）。
 
 ---
 

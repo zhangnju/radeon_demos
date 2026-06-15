@@ -24,9 +24,9 @@ MAX_VRAM_BYTES = int(TOTAL_VRAM_GB * (1024 ** 3) * VRAM_RATIO)   # ~86.4 GB
 BF16_BYTES     = 2            # bf16: 2 bytes / param
 MAX_PARAMS     = MAX_VRAM_BYTES // BF16_BYTES                     # ~46.4B 参数上限
 
-# ── 核心模型（已有 / 不在新增候选列表中） ─────────────────────────────────────
+# ── 核心模型（23 个，已部署，不在新增候选列表中） ────────────────────────────
 
-EXCLUDED = {
+CORE_MODELS = {
     "Qwen/Qwen3.6-27B",
     "Qwen/Qwen3.6-35B-A3B",
     "Qwen/QwQ-32B",
@@ -52,6 +52,18 @@ EXCLUDED = {
     "BAAI/bge-m3",
 }
 
+# ── 其他排除：图像/视频/具身生成，不属于 LLM benchmark 范畴 ─────────────────
+
+EXCLUDED_NON_LLM = {
+    "tencent/HunyuanImage-3.0",
+    "maya-research/maya1",
+    "tencent/HY-Embodied-0.5",
+    "ACE-Step/Ace-Step1.5",
+}
+
+# 筛选时使用两者合集
+EXCLUDED = CORE_MODELS | EXCLUDED_NON_LLM
+
 # ── 数据源（加 limit=500 多捞一些） ───────────────────────────────────────────
 
 SOURCES = [
@@ -64,6 +76,70 @@ HEADERS = {"Accept": "application/json"}
 
 # ── 参数量提取 ────────────────────────────────────────────────────────────────
 # 对于 MoE 模型，用总参数量（非激活参数量）估算显存占用
+
+# ── 人工核查参数量（无法从模型名自动推断的模型） ─────────────────────────────
+# 适合 2×48G bf16 运行的模型填真实参数量；过大的也填入，让 VRAM 检查正确过滤
+
+MANUAL_PARAMS: dict[str, int] = {
+    # Gemma 4 Efficient 系列
+    "google/gemma-4-E2B-it":           2_000_000_000,
+    "google/gemma-4-E2B":              2_000_000_000,
+    "google/gemma-4-E4B":              4_000_000_000,
+    # Microsoft Phi-4-mini
+    "microsoft/Phi-4-mini-instruct":   3_800_000_000,
+    # MiniCPM
+    "openbmb/MiniCPM-V-4.6":          1_300_000_000,   # safetensors ~2.6GB
+    "openbmb/MiniCPM-o-4_5":          9_000_000_000,
+    "openbmb/MiniCPM-SALA":           9_000_000_000,
+    # Facebook SAM3
+    "facebook/sam3":                   1_700_000_000,   # safetensors ~3.44GB
+    # GLM 系列（zai-org）
+    "zai-org/GLM-4.6":                 9_000_000_000,
+    "zai-org/GLM-4.5":                 9_000_000_000,
+    "zai-org/GLM-4.5V":                9_000_000_000,
+    "zai-org/GLM-OCR":                 9_000_000_000,
+    # Microsoft Phi-4 multimodal
+    "microsoft/Phi-4-multimodal-instruct": 5_600_000_000,
+    # MiniCPM-o-2_6
+    "openbmb/MiniCPM-o-2_6":          8_000_000_000,
+    # Jina ReaderLM
+    "jinaai/ReaderLM-v2":             1_500_000_000,
+    # DeepSeek OCR
+    "deepseek-ai/DeepSeek-OCR":        1_000_000_000,
+    "deepseek-ai/DeepSeek-OCR-2":      1_000_000_000,
+    # StepFun — 196B，bf16 需 ~392GB，超出 96GB 限制
+    "stepfun-ai/Step-3.5-Flash":     196_000_000_000,
+    # Microsoft VibeVoice ASR
+    "microsoft/VibeVoice-ASR":           300_000_000,
+    # Baidu Qianfan OCR
+    "baidu/Qianfan-OCR":               1_000_000_000,
+    # Cohere transcribe
+    "CohereLabs/cohere-transcribe-03-2026": 1_000_000_000,
+    # MiniCPM-V-4_5
+    "openbmb/MiniCPM-V-4_5":          9_000_000_000,
+    # Cohere North Mini Code
+    "CohereLabs/North-Mini-Code-1.0": 30_000_000_000,
+    # OpenAI privacy-filter
+    "openai/privacy-filter":           1_000_000_000,
+    # Google Gemma 3n / SigLIP2
+    "google/gemma-3n-E4B-it":          8_000_000_000,
+    "google/siglip2-so400m-patch16-naflex": 1_000_000_000,
+    "google/siglip2-so400m-patch16-256":    1_000_000_000,
+    "google/siglip2-base-patch16-naflex":     400_000_000,
+    # 以下模型过大，填入参数量让 VRAM 检查正确过滤（不再归入"参数量未知"）
+    "tencent/Hunyuan-A13B-Instruct":  80_000_000_000,  # MoE ~13B active，总参 ~80B
+    "moonshotai/Kimi-K2.5":        1_000_000_000_000,  # MoE 1T total
+    "moonshotai/Kimi-K2.6":        1_000_000_000_000,
+    "moonshotai/Kimi-K2.7-Code":   1_000_000_000_000,
+    "moonshotai/Kimi-K2-Thinking": 1_000_000_000_000,
+    "MiniMaxAI/MiniMax-M3":          428_000_000_000,  # MoE 428B total
+    "MiniMaxAI/MiniMax-M1-80k":      465_000_000_000,  # 465B total
+    "stepfun-ai/Step-3.7-Flash":     201_000_000_000,  # 201B total
+    "zai-org/GLM-5":                 754_000_000_000,
+    "zai-org/GLM-5.1":               754_000_000_000,
+    "zai-org/GLM-4.7":               100_000_000_000,  # 超大，具体参数量待确认
+    "Qwen/Qwen3-Coder-Next":          80_000_000_000,
+}
 
 _PATTERNS = [
     # 8x7B / 8X22B
@@ -98,6 +174,12 @@ TRANSFORMERS_TAGS = {
 # Tags 表示模型依赖 CUDA 专属运行时，ROCm 不支持
 CUDA_ONLY_TAGS = {"tensorrt", "tensorrt-llm", "cuda-required"}
 
+# 图像/视频/音频生成类 pipeline，不属于 LLM benchmark 范畴
+NON_LLM_PIPELINE_TAGS = {
+    "text-to-image", "text-to-video", "image-to-video",
+    "video-to-video", "image-to-image", "unconditional-image-generation",
+}
+
 
 def is_transformers_compatible(model: dict) -> bool:
     lib = model.get("library_name", "")
@@ -112,6 +194,12 @@ def is_rocm_compatible(model: dict) -> bool:
     """排除依赖 CUDA 专属库（TensorRT 等）的模型。"""
     tags = {t.lower() for t in model.get("tags", [])}
     return not (tags & CUDA_ONLY_TAGS)
+
+
+def is_llm_scope(model: dict) -> bool:
+    """排除图像/视频生成等非 LLM benchmark 范畴的模型。"""
+    tag = model.get("pipeline_tag", "")
+    return tag not in NON_LLM_PIPELINE_TAGS
 
 
 KEYWORD_BLACKLIST = {"abliterated", "uncensored", "heretic", "gguf"}
@@ -139,6 +227,7 @@ TRUSTED_ORGS = {
     "wan-ai", "opengvlab", "allenai", "huggingfaceh4", "huggingfacetb",
     "ibm-granite", "poolside", "tongyi-mai", "hexgrad", "pyannote",
     "answerdotai", "sentence-transformers", "stabilityai", "coqui",
+    "stepfun-ai", "baidu", "coherelabs",
 }
 
 # 非白名单机构模型，likes 低于此阈值且带有 base_model tag 则视为小机构 finetune
@@ -178,11 +267,14 @@ def is_small_org_finetune(model_id: str, model: dict) -> bool:
 
 
 def get_params(model: dict) -> Optional[int]:
-    """优先从 safetensors 元数据获取精确参数量，否则从模型名推断。"""
+    """参数量查找顺序：人工核查表 → safetensors 元数据 → 模型名正则推断。"""
+    mid = model.get("id") or model.get("modelId", "")
+    if mid in MANUAL_PARAMS:
+        return MANUAL_PARAMS[mid]
     st = model.get("safetensors")
     if isinstance(st, dict) and "total" in st:
         return st["total"]
-    name = (model.get("id") or model.get("modelId", "")).split("/")[-1]
+    name = mid.split("/")[-1]
     for pat, calc in _PATTERNS:
         m = pat.search(name)
         if m:
@@ -232,6 +324,7 @@ cnt_not_tf   = 0
 cnt_too_old  = 0
 cnt_large    = 0
 cnt_unknown  = 0
+unknown_models = []
 
 for mid, m in all_models.items():
     if mid in EXCLUDED or is_keyword_blocked(mid) or is_org_blocked(mid) \
@@ -239,7 +332,7 @@ for mid, m in all_models.items():
         cnt_excluded += 1
         continue
 
-    if not is_transformers_compatible(m) or not is_rocm_compatible(m):
+    if not is_transformers_compatible(m) or not is_rocm_compatible(m) or not is_llm_scope(m):
         cnt_not_tf += 1
         continue
 
@@ -251,6 +344,7 @@ for mid, m in all_models.items():
     params = get_params(m)
     if params is None:
         cnt_unknown += 1
+        unknown_models.append(mid)
         continue
 
     if params * BF16_BYTES > MAX_VRAM_BYTES:
@@ -287,6 +381,12 @@ print(f"  显存不足（>96G BF16）:     {cnt_large}")
 print(f"  参数量未知:                {cnt_unknown}")
 print(f"  可运行模型:                {len(qualified)}")
 print(f"{'─'*50}\n")
+
+if unknown_models:
+    print("[ 参数量未知的模型 ]")
+    for i, mid in enumerate(unknown_models, 1):
+        print(f"  {i:>3}. {mid}")
+    print()
 
 # ── 输出表格 ─────────────────────────────────────────────────────────────────
 
@@ -374,10 +474,18 @@ with open("hf_runnable.md", "w", encoding="utf-8") as f:
     f.write(f"以下模型已纳入核心部署，不在新增候选列表中。\n\n")
     f.write(f"| # | 模型 | HuggingFace 链接 |\n")
     f.write(f"|---|------|------------------|\n")
-    excluded_list = sorted(EXCLUDED)
-    for i, mid in enumerate(excluded_list, 1):
+    for i, mid in enumerate(sorted(CORE_MODELS), 1):
         hf_url = f"https://huggingface.co/{mid}"
         f.write(f"| {i} | `{mid}` | {hf_url} |\n")
+
+    if unknown_models:
+        f.write(f"\n---\n\n## 参数量未知的模型\n\n")
+        f.write(f"以下模型无法从 safetensors 元数据或模型名推断参数量，需人工核查。\n\n")
+        f.write(f"| # | 模型 | HuggingFace 链接 |\n")
+        f.write(f"|---|------|------------------|\n")
+        for i, mid in enumerate(unknown_models, 1):
+            hf_url = f"https://huggingface.co/{mid}"
+            f.write(f"| {i} | `{mid}` | {hf_url} |\n")
 
 print(f"\n输出文件：")
 print(f"  hf_runnable.json  — 完整数据（含配置）")

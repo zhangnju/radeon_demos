@@ -60,23 +60,20 @@ pip install onnxruntime
 
 ### Step 2: Clone OpenCV 5.x with HIP Support
 
-The `5.x-hip` branch of `zhangnju/opencv` contains Jeff Daily's HIP core patches (PR [#29285](https://github.com/opencv/opencv/pull/29285)) cherry-picked onto OpenCV 5.x, plus compatibility fixes for building the 4.x-based opencv_contrib cuda modules against 5.x.
+The `5.x-hip` branches contain Jeff Daily's HIP core patches (PR [#29285](https://github.com/opencv/opencv/pull/29285)) cherry-picked onto OpenCV 5.x. The `opencv_contrib` `5.x-hip` branch already includes all 5.x compatibility fixes (namespace doubling, `DataType<uint>` guard, 64-bit integer `VecTraits`/`MakeVec`/`saturate_cast`, geometry API include, and `stereo` module removal) — no manual patches needed.
 
 ```bash
 cd /home
 git clone -b 5.x-hip https://github.com/zhangnju/opencv.git
-git clone -b moat-port https://github.com/jeffdaily/opencv_contrib.git
+git clone -b 5.x-hip https://github.com/zhangnju/opencv_contrib.git
 ```
 
-### Step 3: Apply 5.x Compatibility Patches to opencv_contrib
+<details>
+<summary>What the 5.x-hip branch patches (for reference)</summary>
 
-The opencv_contrib `moat-port` branch targets OpenCV 4.x. Several fixes are needed for 5.x:
+The upstream `moat-port` branch targets OpenCV 4.x. The `5.x-hip` branch applies these fixes on top:
 
-```bash
-cd /home/opencv_contrib
-```
-
-**3a. Fix namespace doubling** — HIP compiler resolves `cv::cuda::` as `cv::cv::cuda::` inside `namespace cv {}`:
+**a. Fix namespace doubling** — HIP compiler resolves `cv::cuda::` as `cv::cv::cuda::` inside `namespace cv {}`:
 
 Files: `modules/cudev/include/opencv2/cudev/util/{vec_math,vec_traits,detail/type_traits}.hpp`
 
@@ -85,7 +82,7 @@ Files: `modules/cudev/include/opencv2/cudev/util/{vec_math,vec_traits,detail/typ
 + using ::cv::cuda::device::compat::double4;
 ```
 
-**3b. Guard DataType\<uint\> redefinition** — OpenCV 5.x core already defines `DataType<unsigned>`:
+**b. Guard DataType\<uint\> redefinition** — OpenCV 5.x core already defines `DataType<unsigned>`:
 
 File: `modules/cudev/include/opencv2/cudev/util/vec_traits.hpp`
 
@@ -97,7 +94,7 @@ template <> class DataType<uint> { ... };
 #endif
 ```
 
-**3c. Add VecTraits/MakeVec for 64-bit integers** — OpenCV 5.x uses `long`/`unsigned long` in GPU convertTo:
+**c. Add VecTraits/MakeVec for 64-bit integers** — OpenCV 5.x uses `long`/`unsigned long` in GPU convertTo:
 
 File: `modules/cudev/include/opencv2/cudev/util/vec_traits.hpp`
 
@@ -114,7 +111,7 @@ template<> struct MakeVec<long, 4> { typedef long type; };
 // same for unsigned long
 ```
 
-**3d. Add saturate_cast base templates** for `long`/`unsigned long`:
+**d. Add saturate_cast base templates** for `long`/`unsigned long`:
 
 File: `modules/cudev/include/opencv2/cudev/util/saturate_cast.hpp`
 
@@ -124,17 +121,15 @@ template <typename T> __device__ __forceinline__ T saturate_cast(long v) { retur
 template <typename T> __device__ __forceinline__ T saturate_cast(unsigned long v) { return T(v); }
 ```
 
-**3e. Fix 5.x API moves**:
+**e. Fix 5.x API moves**:
 
 File: `modules/cudawarping/src/warp.cpp` — add `#include "opencv2/geometry/2d.hpp"` (invertAffineTransform moved to geometry module in 5.x)
 
-**3f. Remove duplicate stereo module** (moved to opencv core in 5.x):
+**f. Remove duplicate stereo module** (moved to opencv core in 5.x)
 
-```bash
-mv modules/stereo ../opencv_contrib_stereo_backup
-```
+</details>
 
-### Step 4: Build OpenCV 5.x with HIP
+### Step 3: Build OpenCV 5.x with HIP
 
 Replace `gfx1100` with your GPU architecture (`gfx1201` for RDNA4, etc.):
 
@@ -167,7 +162,7 @@ cmake --install .
 
 Built modules include: `core cudaarithm cudabgsegm cudacodec cudafilters cudaimgproc cudawarping cudev dnn python3` and more.
 
-### Step 5: Verify OpenCV HIP
+### Step 4: Verify OpenCV HIP
 
 ```bash
 PYTHONPATH=/opt/opencv5/lib/python3.12/site-packages python3 -c "
@@ -182,7 +177,7 @@ Expected output:
 GPU devices: 1
 ```
 
-### Step 6: Start vLLM Server
+### Step 5: Start vLLM Server
 
 ```bash
 vllm serve /models/Qwen3-VL-8B-Instruct \
@@ -307,6 +302,6 @@ ocv_pipeline_demo/
 ## Source Code
 
 - OpenCV 5.x + HIP: [zhangnju/opencv](https://github.com/zhangnju/opencv) branch `5.x-hip`
-- opencv_contrib HIP: [jeffdaily/opencv_contrib](https://github.com/jeffdaily/opencv_contrib) branch `moat-port` (+ 5.x compat patches)
+- opencv_contrib HIP: [zhangnju/opencv_contrib](https://github.com/zhangnju/opencv_contrib) branch `5.x-hip` (based on jeffdaily/opencv_contrib `moat-port` + 5.x compat patches)
 - HIP core PR: [opencv/opencv#29285](https://github.com/opencv/opencv/pull/29285)
 - HIP cuda modules PR: [opencv/opencv_contrib#4147](https://github.com/opencv/opencv_contrib/pull/4147)

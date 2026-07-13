@@ -192,12 +192,36 @@ Wait ~2 minutes for model loading. Verify with:
 curl http://localhost:8198/v1/models
 ```
 
+## Sample Videos
+
+Download free test videos from [Pexels](https://www.pexels.com/) (CC0 license, no registration needed):
+
+```bash
+cd /home
+
+# Street scene — pedestrians + passing cars (1080p, 25fps)
+wget -O sidewalk.mp4 "https://videos.pexels.com/video-files/854100/854100-hd_1920_1080_25fps.mp4"
+
+# Crossroad — people crossing + vehicles (1080p, 25fps)
+wget -O crossroad.mp4 "https://videos.pexels.com/video-files/853743/853743-hd_1920_1080_25fps.mp4"
+
+# Busy street — dense pedestrian traffic (1080p, 30fps)
+wget -O street.mp4 "https://videos.pexels.com/video-files/3552510/3552510-hd_1920_1080_30fps.mp4"
+```
+
+Or generate a test video from the classic YOLO test image:
+
+```bash
+wget -O zidane.jpg "https://ultralytics.com/images/zidane.jpg"
+ffmpeg -loop 1 -i zidane.jpg -t 2 -pix_fmt yuv420p -r 30 zidane_60f.mp4
+```
+
 ## Running the Pipeline
 
 ```bash
 cd /home/ocv_pipeline_demo
 PYTHONPATH=/opt/opencv5/lib/python3.12/site-packages:/opt/rocm/lib \
-    python3 pipeline.py --input video.mp4 --output output.mp4
+    python3 pipeline.py --input /home/sidewalk.mp4 --output output.mp4
 ```
 
 ### Command-Line Options
@@ -221,37 +245,65 @@ PYTHONPATH=/opt/opencv5/lib/python3.12/site-packages:/opt/rocm/lib \
 
 ## Test Results
 
-### Test Setup
+### Test Videos
 
-- Input: Zidane test image (1280x720) repeated as 60-frame video
-- YOLO26x detects 4 objects: 2 persons (97%, 96%), 2 ties (87%, 81%)
-- VLM describes top-3 detected ROIs per interval
+Three free [Pexels](https://www.pexels.com/) videos (CC0 license, 1920x1080) covering different street scenes:
 
-### Performance: Without VLM
+| Video | Duration | FPS | Content | Typical Detections |
+|-------|----------|-----|---------|--------------------|
+| `sidewalk.mp4` | 15.7s (393 frames) | 25 | Pedestrians + USPS truck on city sidewalk | person, truck, car |
+| `crossroad.mp4` | 24.5s (612 frames) | 25 | People crossing road + vehicles | person, car |
+| `street.mp4` | 23.8s (712 frames) | 30 | Dense pedestrian traffic on busy street | 11-15 persons per frame |
+
+### Performance: Without VLM (`--no-vlm`)
+
+Tested on W7900 with all three sample videos:
+
+| Video | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess | **FPS** |
+|-------|---------------------|---------------------|-------------|---------|
+| `sidewalk.mp4` | 2.21 ms | 6.85 ms | 0.43 ms | **60.5** |
+| `crossroad.mp4` | 2.18 ms | 6.83 ms | 0.35 ms | **67.6** |
+| `street.mp4` | 2.25 ms | 6.85 ms | 0.52 ms | **57.7** |
+
+### Performance: Full Pipeline with VLM
+
+Tested on W7900 with Qwen3-VL via vLLM (`--vlm-interval 30`):
+
+| Video | Preprocess (GPU/HIP) | Detection (MIGraphX) | VLM (per call) | **FPS** |
+|-------|---------------------|---------------------|----------------|---------|
+| `sidewalk.mp4` | 1.71 ms | 7.50 ms | 5130 ms | **5.0** |
+| `crossroad.mp4` | 1.62 ms | 7.44 ms | 3498 ms | **7.4** |
+| `street.mp4` | 1.65 ms | 7.57 ms | 4503 ms | **5.9** |
+
+### VLM Scene Understanding Examples
+
+Qwen3-VL generates natural language descriptions for the top-3 detected ROIs every 30 frames. Example output from `sidewalk.mp4` frame 1:
+
+| Detection | VLM Description |
+|-----------|----------------|
+| person 0.96 | *"A blurred image captures the lower half of a person walking on a city sidewalk."* |
+| truck 0.94 | *"A white United States Postal Service delivery truck with the slogan 'We Deliver For You' is captured in motion on a city street."* |
+| person 0.93 | *"A person in a black shirt and dark jeans walks past a fire hydrant on a city sidewalk."* |
+
+### Cross-GPU Comparison
 
 | Stage | W7900 (gfx1100) | R9700 (gfx1201) | Backend |
 |-------|-----------------|-----------------|---------|
 | GPU Preprocess | **1.93 ms** | 2.45 ms | OpenCV 5.x cv::cuda/HIP |
 | YOLO Detection | **6.82 ms** | 5.34 ms | MIGraphX FP16 zero-copy |
 | Postprocess | 0.34 ms | 0.66 ms | CPU (NMS + draw) |
-| **Total FPS** | **91.9** | **91.1** | |
+| **Total FPS (no VLM)** | **91.9** | **91.1** | |
 
-### Performance: Full Pipeline with VLM
+### MIGraphX vs PyTorch GPU (W7900)
 
-| Stage | W7900 (gfx1100) | R9700 (gfx1201) | Backend |
-|-------|-----------------|-----------------|---------|
-| GPU Preprocess | 4.76 ms | 5.44 ms | OpenCV 5.x cv::cuda/HIP |
-| YOLO Detection | 9.63 ms | 5.20 ms | MIGraphX FP16 zero-copy |
-| VLM (per call) | 5482 ms | 4002 ms | Qwen3-VL via vLLM |
-| Postprocess | 2.08 ms | 2.41 ms | CPU |
-| **Total FPS** | **0.7** | **0.9** | (VLM-bound) |
+YOLO26x inference benchmark (100 runs, input [1,3,640,640]):
 
-### MIGraphX vs ONNX Runtime
-
-| Backend | Latency | Speedup |
-|---------|---------|---------|
-| ONNX Runtime CPU | ~80 ms/frame | 1x |
-| MIGraphX GPU FP16 | ~5-7 ms/frame | **12-15x** |
+| Backend | Latency | FPS | Speedup |
+|---------|---------|-----|---------|
+| PyTorch GPU FP32 | 18.49 ms | 54 | 1x |
+| PyTorch GPU FP16 | 11.52 ms | 87 | 1.6x |
+| MIGraphX FP32 (zero-copy) | 17.33 ms | 58 | 1.1x |
+| MIGraphX FP16 (zero-copy) | **6.30 ms** | **159** | **2.9x** |
 
 ## Key Technical Details
 

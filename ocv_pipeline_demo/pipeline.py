@@ -27,8 +27,8 @@ import numpy as np
 import config
 from preprocess import preprocess_frame, preprocess_frame_cpu
 from detector import YOLODetector
-from vlm_client import VLMClient
-from postprocess import draw_detections, draw_stats
+from vlm_client import AsyncVLMClient
+from postprocess import draw_detections, draw_scene_panel, draw_stats
 
 
 def check_gpu():
@@ -121,12 +121,12 @@ def main():
     print()
     detector = YOLODetector(device_id=args.device)
 
-    # --- Init VLM client ---
+    # --- Init VLM client (async — never blocks the main loop) ---
     vlm = None
     if not args.no_vlm:
-        vlm = VLMClient()
+        vlm = AsyncVLMClient()
         if vlm.health_check():
-            print(f"[pipeline] VLM connected: {config.VLLM_BASE_URL}")
+            print(f"[pipeline] VLM connected (async): {vlm.base_url}")
         else:
             print(f"[pipeline] WARNING: VLM not available at {config.VLLM_BASE_URL}, running without VLM")
             vlm = None
@@ -167,14 +167,18 @@ def main():
         t2 = time.time()
         t_detect += t2 - t1
 
-        # --- Stage 3: VLM (periodic) ---
+        # --- Stage 3: VLM (async, periodic) ---
         if vlm and detections and (frame_count % args.vlm_interval == 0 or frame_count == 1):
-            vlm_descriptions = vlm.describe_rois(frame, detections)
+            vlm.submit_rois(frame.copy(), detections)
+        if vlm:
+            vlm_descriptions = vlm.get_latest()
         t3 = time.time()
         t_vlm += t3 - t2
 
         # --- Stage 4: Overlay ---
         draw_detections(frame, detections, vlm_descriptions if vlm_descriptions else None)
+        if vlm_descriptions:
+            draw_scene_panel(frame, vlm_descriptions)
 
         elapsed = time.time() - t_start
         current_fps = frame_count / elapsed if elapsed > 0 else 0
@@ -186,7 +190,8 @@ def main():
             "Detect": f"{(t2-t1)*1000:.1f}ms",
         }
         if vlm:
-            stats["VLM"] = f"{(t3-t2)*1000:.0f}ms" if t3 - t2 > 0.001 else "cached"
+            lat = vlm.last_latency
+            stats["VLM"] = f"{lat*1000:.0f}ms" if lat > 0 else "pending"
         draw_stats(frame, stats)
 
         t4 = time.time()

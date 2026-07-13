@@ -1,11 +1,10 @@
 """Qwen3-VL scene understanding via vLLM OpenAI-compatible API."""
 
 import base64
-import io
+import threading
 import time
 
 import cv2
-import numpy as np
 from openai import OpenAI
 
 import config
@@ -18,15 +17,6 @@ class VLMClient:
         self.client = OpenAI(base_url=self.base_url, api_key="not-needed")
 
     def describe_roi(self, roi_image, prompt=None):
-        """Send a cropped ROI image to Qwen3-VL and get a description.
-
-        Args:
-            roi_image: BGR numpy array of the cropped region
-            prompt: optional custom prompt
-
-        Returns:
-            description string
-        """
         _, buf = cv2.imencode(".jpg", roi_image, [cv2.IMWRITE_JPEG_QUALITY, 85])
         b64 = base64.b64encode(buf).decode("utf-8")
 
@@ -57,16 +47,6 @@ class VLMClient:
             return f"[VLM error: {e}]"
 
     def describe_rois(self, frame, detections, top_k=None):
-        """Describe the top-K detected regions.
-
-        Args:
-            frame: original BGR frame
-            detections: list of (x1, y1, x2, y2, score, class_id)
-            top_k: max number of ROIs to describe
-
-        Returns:
-            list of (detection, description) tuples
-        """
         top_k = top_k or config.VLM_TOP_K_ROIS
         sorted_dets = sorted(detections, key=lambda d: d[4], reverse=True)[:top_k]
 
@@ -82,9 +62,54 @@ class VLMClient:
         return results
 
     def health_check(self):
-        """Check if the vLLM server is ready."""
         try:
             models = self.client.models.list()
             return len(models.data) > 0
         except Exception:
             return False
+
+
+class AsyncVLMClient:
+    """Non-blocking wrapper — runs VLM in a background thread so the main
+    pipeline never stalls.  Latest results are cached and reused across frames
+    until a new VLM call completes."""
+
+    def __init__(self, base_url=None, model_name=None):
+        self._sync = VLMClient(base_url, model_name)
+        self._lock = threading.Lock()
+        self._latest = []
+        self._thread = None
+        self._last_latency = 0.0
+
+    def health_check(self):
+        return self._sync.health_check()
+
+    @property
+    def base_url(self):
+        return self._sync.base_url
+
+    @property
+    def last_latency(self):
+        return self._last_latency
+
+    def submit_rois(self, frame, detections, top_k=None):
+        """Fire-and-forget: starts VLM inference in background.
+        Skips if a previous call is still running."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run, args=(frame, detections, top_k), daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self, frame, detections, top_k):
+        t0 = time.time()
+        results = self._sync.describe_rois(frame, detections, top_k)
+        self._last_latency = time.time() - t0
+        with self._lock:
+            self._latest = results
+
+    def get_latest(self):
+        """Return the most recent VLM results (non-blocking)."""
+        with self._lock:
+            return list(self._latest)

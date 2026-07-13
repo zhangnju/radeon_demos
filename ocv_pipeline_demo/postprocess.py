@@ -52,9 +52,9 @@ def draw_detections(frame, detections, descriptions=None):
 def _draw_vlm_text(frame, x, y, box_width, text, color):
     """Draw VLM description text below the bounding box."""
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.45
-    thickness = 1
-    max_width = max(box_width, 200)
+    font_scale = 0.55
+    thickness = 2
+    max_width = max(box_width, 300)
     words = text.split()
     lines = []
     current_line = ""
@@ -70,8 +70,8 @@ def _draw_vlm_text(frame, x, y, box_width, text, color):
     if current_line:
         lines.append(current_line)
 
-    line_height = 18
-    padding = 4
+    line_height = 22
+    padding = 6
     total_height = len(lines) * line_height + 2 * padding
     max_text_width = 0
     for line in lines:
@@ -83,12 +83,56 @@ def _draw_vlm_text(frame, x, y, box_width, text, color):
 
     overlay = frame.copy()
     cv2.rectangle(overlay, (x, y), (bg_x2, bg_y2), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+    cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
 
     for i, line in enumerate(lines):
         ty = y + padding + (i + 1) * line_height - 4
         if ty < frame.shape[0]:
+            cv2.putText(frame, line, (x + padding, ty), font, font_scale, (0, 0, 0), thickness + 2)
             cv2.putText(frame, line, (x + padding, ty), font, font_scale, (255, 255, 255), thickness)
+
+
+def draw_scene_panel(frame, descriptions):
+    """Draw a scene summary panel at the bottom of the frame.
+
+    Shows all VLM descriptions in a single readable bar so the user can
+    always see what the VLM is saying, even when per-box text is small.
+    """
+    if not descriptions:
+        return
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.55
+    thickness = 2
+    line_height = 24
+    padding = 8
+    margin = 4
+    h, w = frame.shape[:2]
+
+    lines = []
+    for det, desc in descriptions:
+        class_id = int(det[5])
+        name = config.COCO_CLASSES[class_id] if class_id < len(config.COCO_CLASSES) else f"cls{class_id}"
+        line = f"[{name}] {desc}"
+        # truncate if too long for frame width
+        while True:
+            (tw, _), _ = cv2.getTextSize(line, font, font_scale, thickness)
+            if tw <= w - 2 * padding or len(line) <= 10:
+                break
+            line = line[:-4] + "..."
+        lines.append(line)
+
+    panel_h = len(lines) * line_height + 2 * padding
+    panel_y = h - panel_h
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, panel_y), (w, h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.88, frame, 0.12, 0, frame)
+
+    for i, line in enumerate(lines):
+        ty = panel_y + padding + (i + 1) * line_height - 6
+        cv2.putText(frame, line, (padding, ty), font, font_scale, (0, 0, 0), thickness + 2)
+        cv2.putText(frame, line, (padding, ty), font, font_scale, (200, 255, 200), thickness)
 
 
 def draw_stats(frame, stats):

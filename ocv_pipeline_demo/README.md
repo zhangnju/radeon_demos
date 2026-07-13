@@ -243,6 +243,26 @@ PYTHONPATH=/opt/opencv5/lib/python3.12/site-packages:/opt/rocm/lib \
 | `HIP_VISIBLE_DEVICES` | all | Select GPU (e.g., `3` for 4th GPU) |
 | `YOLO_BACKEND` | `auto` | Force `migraphx` or `ort` |
 
+## Demo
+
+### sidewalk.mp4 — Pedestrians + USPS Truck
+
+| Input | Output (YOLO26x + Qwen3-VL) |
+|:-----:|:---------------------------:|
+| ![input](assets/input_sidewalk.gif) | ![output](assets/output_sidewalk_vlm.gif) |
+
+### crossroad.mp4 — People Crossing + Vehicles
+
+| Input | Output (YOLO26x + Qwen3-VL) |
+|:-----:|:---------------------------:|
+| ![input](assets/input_crossroad.gif) | ![output](assets/output_crossroad_vlm.gif) |
+
+### street.mp4 — Dense Pedestrian Traffic
+
+| Input | Output (YOLO26x + Qwen3-VL) |
+|:-----:|:---------------------------:|
+| ![input](assets/input_street.gif) | ![output](assets/output_street_vlm.gif) |
+
 ## Test Results
 
 ### Test Videos

@@ -222,10 +222,10 @@ docker pull ghcr.io/ggml-org/llama.cpp:server-rocm
 **Download a vision GGUF model:**
 
 ```bash
-# Qwen2-VL 7B Q4_K_M — works on RDNA3 and RDNA4
-huggingface-cli download bartowski/Qwen2-VL-7B-Instruct-GGUF \
-    Qwen2-VL-7B-Instruct-Q4_K_M.gguf \
-    mmproj-Qwen2-VL-7B-Instruct-f16.gguf \
+# Qwen3-VL 8B Q8_0 — works on RDNA3 and RDNA4
+huggingface-cli download unsloth/Qwen3-VL-8B-Instruct-GGUF \
+    Qwen3-VL-8B-Instruct-Q8_0.gguf \
+    mmproj-F16.gguf \
     --local-dir /models
 ```
 
@@ -233,8 +233,8 @@ huggingface-cli download bartowski/Qwen2-VL-7B-Instruct-GGUF \
 
 ```bash
 bash start_llamacpp.sh \
-    /models/Qwen2-VL-7B-Instruct-Q4_K_M.gguf \
-    /models/mmproj-Qwen2-VL-7B-Instruct-f16.gguf \
+    /models/Qwen3-VL-8B-Instruct-Q8_0.gguf \
+    /models/mmproj-F16.gguf \
     8199
 ```
 
@@ -305,7 +305,7 @@ python3 pipeline.py --input sidewalk.mp4 --output out.mp4 \
 python3 pipeline.py --input sidewalk.mp4 --output out.mp4 \
     --vlm-backend llamacpp \
     --vlm-url http://localhost:8199/v1 \
-    --vlm-model Qwen2-VL-7B-Instruct-Q4_K_M.gguf
+    --vlm-model Qwen3-VL-8B-Instruct-Q8_0.gguf
 ```
 
 ### Environment Variables

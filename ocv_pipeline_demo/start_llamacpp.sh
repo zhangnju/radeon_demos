@@ -11,10 +11,10 @@
 #   bash start_llamacpp.sh [model.gguf] [mmproj.gguf] [port]
 #
 # Examples:
-#   bash start_llamacpp.sh /models/Qwen2-VL-7B-Q4_K_M.gguf /models/Qwen2-VL-7B-mmproj.gguf
+#   bash start_llamacpp.sh /models/Qwen3-VL-8B-Instruct-Q8_0.gguf /models/mmproj-F16.gguf
 #   bash start_llamacpp.sh /models/llava-v1.6-mistral-7b.Q4_K_M.gguf /models/llava-v1.6-mmproj-model-f16.gguf 8199
 
-MODEL="${1:-/models/Qwen2-VL-7B-Instruct-Q4_K_M.gguf}"
+MODEL="${1:-/models/Qwen3-VL-8B-Instruct-Q8_0.gguf}"
 MMPROJ="${2:-}"   # multimodal projector weights (required for vision models)
 PORT="${3:-8199}"
 GPU_LAYERS="${LLAMACPP_GPU_LAYERS:-99}"   # offload all layers to GPU by default
@@ -75,10 +75,10 @@ if [ ! -f "${MODEL}" ]; then
     echo "[llama.cpp] ERROR: model file not found: ${MODEL}"
     echo ""
     echo "  Download a vision GGUF model, for example:"
-    echo "    # Qwen2-VL 7B (recommended — RDNA3/RDNA4 tested)"
-    echo "    huggingface-cli download bartowski/Qwen2-VL-7B-Instruct-GGUF \\"
-    echo "        Qwen2-VL-7B-Instruct-Q4_K_M.gguf \\"
-    echo "        mmproj-Qwen2-VL-7B-Instruct-f16.gguf \\"
+    echo "    # Qwen3-VL 8B (recommended — RDNA3/RDNA4 tested)"
+    echo "    huggingface-cli download unsloth/Qwen3-VL-8B-Instruct-GGUF \\"
+    echo "        Qwen3-VL-8B-Instruct-Q8_0.gguf \\"
+    echo "        mmproj-F16.gguf \\"
     echo "        --local-dir /models"
     exit 1
 fi

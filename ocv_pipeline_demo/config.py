@@ -13,9 +13,21 @@ NMS_IOU_THRESHOLD = 0.45
 # --- GPU ---
 GPU_DEVICE_ID = 0
 
+# --- VLM backend selection ---
+# Options: "vllm" | "llamacpp"
+VLM_BACKEND = "vllm"
+
 # --- vLLM / Qwen3-VL ---
 VLLM_BASE_URL = "http://localhost:8198/v1"
 VLLM_MODEL_NAME = "/models/Qwen3-VL-8B-Instruct"
+
+# --- llama.cpp server ---
+LLAMACPP_BASE_URL = "http://localhost:8199/v1"
+# Model name as reported by the llama.cpp server; use "auto" to query
+# /v1/models at runtime and pick the first available model.
+LLAMACPP_MODEL_NAME = "auto"
+
+# --- Shared VLM settings ---
 VLM_MAX_TOKENS = 100
 VLM_TOP_K_ROIS = 3  # max ROIs to send to VLM per frame
 VLM_PROMPT = "Describe this object or scene in one concise sentence."

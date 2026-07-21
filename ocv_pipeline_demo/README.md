@@ -177,7 +177,7 @@ Expected output:
 GPU devices: 1
 ```
 
-### Step 5: Start vLLM Server
+### Step 5a: Start vLLM Server (default backend)
 
 ```bash
 vllm serve /models/Qwen3-VL-8B-Instruct \
@@ -190,6 +190,58 @@ Wait ~2 minutes for model loading. Verify with:
 
 ```bash
 curl http://localhost:8198/v1/models
+```
+
+### Step 5b: Start llama.cpp Server (alternative backend)
+
+llama.cpp supports AMD RDNA3/RDNA4 GPUs natively via ROCm/HIP and is a
+lightweight alternative to vLLM — lower VRAM overhead, no Python runtime,
+useful when running the full pipeline on a single GPU.
+
+**Build llama.cpp with ROCm:**
+
+```bash
+git clone https://github.com/ggml-org/llama.cpp
+cd llama.cpp
+
+# RDNA3 (gfx1100, e.g. W7900 / RX 7900 XTX)
+cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100 -DCMAKE_BUILD_TYPE=Release
+# RDNA4 (gfx1201, e.g. RX 9700)
+cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1201 -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build --target llama-server -j$(nproc)
+sudo cmake --install build
+```
+
+Or use the pre-built Docker image (already includes ROCm support):
+
+```bash
+docker pull ghcr.io/ggml-org/llama.cpp:server-rocm
+```
+
+**Download a vision GGUF model:**
+
+```bash
+# Qwen2-VL 7B Q4_K_M — works on RDNA3 and RDNA4
+huggingface-cli download bartowski/Qwen2-VL-7B-Instruct-GGUF \
+    Qwen2-VL-7B-Instruct-Q4_K_M.gguf \
+    mmproj-Qwen2-VL-7B-Instruct-f16.gguf \
+    --local-dir /models
+```
+
+**Start the server:**
+
+```bash
+bash start_llamacpp.sh \
+    /models/Qwen2-VL-7B-Instruct-Q4_K_M.gguf \
+    /models/mmproj-Qwen2-VL-7B-Instruct-f16.gguf \
+    8199
+```
+
+Verify with:
+
+```bash
+curl http://localhost:8199/v1/models
 ```
 
 ## Sample Videos
@@ -230,11 +282,31 @@ PYTHONPATH=/opt/opencv5/lib/python3.12/site-packages:/opt/rocm/lib \
 |------|---------|-------------|
 | `--input`, `-i` | (required) | Video file, RTSP URL, or camera index |
 | `--output`, `-o` | `output.mp4` | Output video path |
-| `--no-vlm` | off | Skip Qwen3-VL stage |
+| `--no-vlm` | off | Skip VLM stage entirely |
+| `--vlm-backend` | `vllm` | VLM backend: `vllm` or `llamacpp` |
+| `--vlm-url` | (from config) | Override VLM server base URL |
+| `--vlm-model` | (from config) | Override VLM model name (`auto` for llama.cpp auto-detect) |
 | `--max-frames` | 0 (all) | Limit frames to process |
 | `--vlm-interval` | 30 | Run VLM every N frames |
 | `--device` | 0 | GPU device index |
 | `--display` | off | Show cv2.imshow window (needs X11) |
+
+**Examples:**
+
+```bash
+# Default: vLLM backend
+python3 pipeline.py --input sidewalk.mp4 --output out.mp4
+
+# llama.cpp backend (server already started on port 8199)
+python3 pipeline.py --input sidewalk.mp4 --output out.mp4 \
+    --vlm-backend llamacpp
+
+# llama.cpp with custom URL and explicit model name
+python3 pipeline.py --input sidewalk.mp4 --output out.mp4 \
+    --vlm-backend llamacpp \
+    --vlm-url http://localhost:8199/v1 \
+    --vlm-model Qwen2-VL-7B-Instruct-Q4_K_M.gguf
+```
 
 ### Environment Variables
 
@@ -294,6 +366,69 @@ Tested on W7900 with Qwen3-VL via vLLM (`--vlm-interval 30`):
 | `sidewalk.mp4` | 1.71 ms | 7.50 ms | 5130 ms | **5.0** |
 | `crossroad.mp4` | 1.62 ms | 7.44 ms | 3498 ms | **7.4** |
 | `street.mp4` | 1.65 ms | 7.57 ms | 4503 ms | **5.9** |
+
+### Performance: Single-GPU (pipeline + VLM on one card)
+
+Entire pipeline (YOLO/MIGraphX + VLM server) pinned to a **single GPU**, `street.mp4`
+(712 frames), Qwen3-VL-8B, GPU/HIP OpenCV, `--vlm-interval 30`. Because the VLM stage is
+asynchronous (fire-and-forget in a background thread), it does not block the main loop — the
+pipeline sustains real-time FPS while VLM inference runs concurrently on the same GPU.
+
+| GPU | VLM backend | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess | **FPS** |
+|-----|-------------|---------------------|----------------------|-------------|---------|
+| **R9700 (gfx1201)** | llama.cpp Q8_0 | 1.08 ms | 7.36 ms | 1.54 ms | **53.4** |
+| **W7900 (gfx1100)** | llama.cpp Q8_0 | 3.05 ms | 15.09 ms | 1.39 ms | **37.9** |
+| **W7900 (gfx1100)** | vLLM BF16 | 1.31 ms | 11.12 ms | 0.84 ms | **49.0** |
+
+On R9700, CPU-fallback preprocessing (no HIP OpenCV) gives 50.4 FPS vs 53.4 FPS with
+GPU/HIP preprocessing. All configs exceed the 30 fps source rate (real-time).
+
+> The two W7900 rows share the same hardware but differ in how the co-located VLM server
+> contends for the GPU. With the llama.cpp server actively running on the same card, YOLO
+> detection is throttled to ~15 ms/frame; with vLLM (which idles between the sparse async
+> calls) detection runs at ~11 ms/frame. The measured pipeline FPS therefore reflects
+> **GPU contention from the co-located VLM server**, not raw YOLO throughput (see the
+> no-VLM Cross-GPU Comparison below for contention-free detection numbers).
+
+> GPU preprocessing requires the HIP-enabled OpenCV 5.x build on the Python path
+> (`cv2.cuda.getCudaEnabledDeviceCount()` must return ≥ 1); otherwise the pipeline
+> automatically falls back to CPU preprocessing.
+
+### VLM Inference Latency (R9700, single GPU)
+
+Real per-request VLM latency (the pipeline's async stats report only submit time, **not** the
+actual inference latency). Measured against the llama.cpp server (Qwen3-VL-8B **Q8_0**), single
+ROI image, `max_tokens=100`:
+
+| Measurement | Latency | Notes |
+|-------------|---------|-------|
+| **Client end-to-end** (JPEG encode + base64 + HTTP + inference) | **582 ms** avg | median 570 ms, range 502–704 ms (8 runs) |
+| Server-side total | 507–687 ms | from llama.cpp `print_timing` |
+| ├─ Prompt eval (incl. image encode) | ~100–150 ms | 280–1150 tok/s |
+| └─ Generation | ~400–540 ms | **~58 tok/s** (25–31 tokens) |
+
+> The pipeline sends `VLM_TOP_K_ROIS=3` ROIs **serially** per VLM trigger, so one full VLM
+> cycle takes ≈ 3 × 582 ≈ **1.7 s** of wall-clock — but it runs asynchronously every 30 frames,
+> so the main loop still holds 53 FPS.
+
+### VLM Backend Comparison (single-concurrency, single ROI)
+
+Same model, single ROI, `max_tokens=100`, per-request latency (client end-to-end):
+
+| GPU | Precision | Backend | Avg latency | Throughput |
+|-----|-----------|---------|-------------|------------|
+| **R9700 (gfx1201)** | Q8_0 | llama.cpp | **584 ms** | **46.5 tok/s** |
+|                     | BF16 | llama.cpp | 1094 ms | 29.1 tok/s |
+|                     | BF16 | vLLM | 1279–1322 ms | ~21 tok/s |
+| **W7900 (gfx1100)** | Q8_0 | llama.cpp | **531 ms** | ~48 tok/s |
+|                     | BF16 | llama.cpp | 721 ms | 35.7 tok/s |
+|                     | BF16 | vLLM | 1397 ms | 20.9 tok/s |
+
+> Single-concurrency, low-latency scenario (the demo fires one async VLM call every 30 frames).
+> llama.cpp leads here on both GPUs; vLLM's continuous-batching advantage shows at higher
+> concurrency. Output quality is equivalent across backends and precisions. Notably, W7900's
+> larger VRAM (48 GB) and mature RDNA3 llama.cpp path give it slightly lower VLM latency than
+> R9700, even though R9700 is faster on the CV/YOLO pipeline stages.
 
 ### VLM Scene Understanding Examples
 
@@ -363,10 +498,11 @@ ocv_pipeline_demo/
 ├── pipeline.py          # Main orchestrator — frame loop
 ├── preprocess.py        # GPU preprocessing (cv::cuda warpAffine/cvtColor/convertTo)
 ├── detector.py          # YOLO26x detection (MIGraphX GPU or ONNX Runtime fallback)
-├── vlm_client.py        # Qwen3-VL via vLLM OpenAI-compatible API
+├── vlm_client.py        # VLM clients: VLMClient (vLLM), LlamaCppVLMClient, AsyncVLMClient
 ├── postprocess.py       # NMS, bounding box overlay, VLM text rendering
-├── config.py            # Paths, thresholds, model parameters
-├── start_vllm.sh        # Launch vLLM server
+├── config.py            # Paths, thresholds, model parameters, VLM_BACKEND selection
+├── start_vllm.sh        # Launch vLLM server (Qwen3-VL)
+├── start_llamacpp.sh    # Launch llama.cpp server (GGUF vision models, ROCm/HIP)
 ├── setup_env.sh         # One-time environment setup
 └── README.md            # This file
 ```

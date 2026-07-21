@@ -4,7 +4,7 @@ End-to-End Vision AI Pipeline on AMD Radeon with OpenCV 5 + ROCm/HIP
 
 Pipeline:
   Video Input → GPU Preprocess (cv::cuda/HIP) → YOLO26x (MIGraphX)
-  → NMS + ROI Crop → Qwen3-VL (vLLM) → Overlay + Output
+  → NMS + ROI Crop → VLM (vLLM or llama.cpp) → Overlay + Output
 """
 
 import argparse
@@ -66,7 +66,19 @@ def parse_args():
     )
     parser.add_argument(
         "--no-vlm", action="store_true",
-        help="Skip VLM (Qwen3-VL) stage for faster processing",
+        help="Skip VLM stage for faster processing",
+    )
+    parser.add_argument(
+        "--vlm-backend", default=None, choices=["vllm", "llamacpp"],
+        help="VLM inference backend: 'vllm' (default) or 'llamacpp'",
+    )
+    parser.add_argument(
+        "--vlm-url", default=None,
+        help="Override VLM server base URL (e.g. http://localhost:8199/v1)",
+    )
+    parser.add_argument(
+        "--vlm-model", default=None,
+        help="Override VLM model name (llama.cpp: use 'auto' to detect)",
     )
     parser.add_argument(
         "--max-frames", type=int, default=0,
@@ -89,7 +101,9 @@ def main():
 
     print("=" * 70)
     print("  End-to-End Vision AI Pipeline on AMD Radeon with OpenCV 5")
-    print("  OpenCV + ROCm/HIP | YOLO26x + MIGraphX | Qwen3-VL + vLLM")
+    _backend = (args.vlm_backend or config.VLM_BACKEND).lower() if not args.no_vlm else "disabled"
+    _vlm_label = {"vllm": "Qwen3-VL + vLLM", "llamacpp": "VLM + llama.cpp", "disabled": "no VLM"}.get(_backend, _backend)
+    print(f"  OpenCV + ROCm/HIP | YOLO26x + MIGraphX | {_vlm_label}")
     print("=" * 70)
     print()
 
@@ -124,11 +138,15 @@ def main():
     # --- Init VLM client (async — never blocks the main loop) ---
     vlm = None
     if not args.no_vlm:
-        vlm = AsyncVLMClient()
+        vlm = AsyncVLMClient(
+            backend=args.vlm_backend,
+            base_url=args.vlm_url,
+            model_name=args.vlm_model,
+        )
         if vlm.health_check():
-            print(f"[pipeline] VLM connected (async): {vlm.base_url}")
+            print(f"[pipeline] VLM connected (async, {vlm.backend_name}): {vlm.base_url}")
         else:
-            print(f"[pipeline] WARNING: VLM not available at {config.VLLM_BASE_URL}, running without VLM")
+            print(f"[pipeline] WARNING: VLM not available at {vlm.base_url}, running without VLM")
             vlm = None
 
     print()
@@ -223,7 +241,7 @@ def main():
     print(f"  Avg Detection:   {t_detect/frame_count*1000:.2f}ms/frame ({detector.backend})")
     if vlm:
         vlm_calls = frame_count // args.vlm_interval + 1
-        print(f"  Avg VLM:         {t_vlm/vlm_calls*1000:.0f}ms/call (Qwen3-VL, every {args.vlm_interval} frames)")
+        print(f"  Avg VLM:         {t_vlm/vlm_calls*1000:.0f}ms/call ({vlm.backend_name}, every {args.vlm_interval} frames)")
     print(f"  Avg Postprocess: {t_postprocess/frame_count*1000:.2f}ms/frame")
     print(f"  Output saved to: {args.output}")
     print("=" * 70)

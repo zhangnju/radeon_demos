@@ -357,38 +357,49 @@ Tested on W7900 with all three sample videos:
 | `crossroad.mp4` | 2.18 ms | 6.83 ms | 0.35 ms | **67.6** |
 | `street.mp4` | 2.25 ms | 6.85 ms | 0.52 ms | **57.7** |
 
-### Performance: Full Pipeline with VLM
+### Performance: Full Pipeline with VLM (single-GPU)
 
-Tested on W7900 with Qwen3-VL via vLLM (`--vlm-interval 30`):
+Entire pipeline (YOLO/MIGraphX + VLM server) pinned to a **single GPU**, Qwen3-VL-8B,
+GPU/HIP OpenCV, `--vlm-interval 30`. The VLM stage is **asynchronous** (fire-and-forget in a
+background thread), so it does not block the main loop — the pipeline sustains real-time FPS
+while VLM inference runs concurrently on the same card. The per-frame VLM time below reflects
+the async **submit** cost (≈0–1 ms), *not* the real inference latency (see
+[VLM Inference Latency](#vlm-inference-latency-r9700-single-gpu) for that).
 
-| Video | Preprocess (GPU/HIP) | Detection (MIGraphX) | VLM (per call) | **FPS** |
-|-------|---------------------|---------------------|----------------|---------|
-| `sidewalk.mp4` | 1.71 ms | 7.50 ms | 5130 ms | **5.0** |
-| `crossroad.mp4` | 1.62 ms | 7.44 ms | 3498 ms | **7.4** |
-| `street.mp4` | 1.65 ms | 7.57 ms | 4503 ms | **5.9** |
+**W7900 (gfx1100):**
 
-### Performance: Single-GPU (pipeline + VLM on one card)
+| Video | VLM backend | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess | **FPS** |
+|-------|-------------|---------------------|---------------------|-------------|---------|
+| `sidewalk.mp4`  | vLLM BF16      | 1.69 ms | 10.13 ms | 0.29 ms | **53.0** |
+| `crossroad.mp4` | vLLM BF16      | 1.62 ms |  9.71 ms | 0.69 ms | **57.3** |
+| `street.mp4`    | vLLM BF16      | 1.54 ms | 11.80 ms | 1.27 ms | **46.2** |
+| `sidewalk.mp4`  | llama.cpp Q8_0 | 2.94 ms | 13.74 ms | 1.10 ms | **41.6** |
+| `crossroad.mp4` | llama.cpp Q8_0 | 2.79 ms | 10.26 ms | 1.19 ms | **51.1** |
+| `street.mp4`    | llama.cpp Q8_0 | 3.13 ms | 12.19 ms | 1.35 ms | **42.2** |
+| `sidewalk.mp4`  | llama.cpp BF16 | 3.19 ms | 14.83 ms | 1.01 ms | **39.5** |
+| `crossroad.mp4` | llama.cpp BF16 | 3.29 ms | 11.85 ms | 1.11 ms | **46.6** |
+| `street.mp4`    | llama.cpp BF16 | 3.66 ms | 14.14 ms | 1.31 ms | **38.5** |
 
-Entire pipeline (YOLO/MIGraphX + VLM server) pinned to a **single GPU**, `street.mp4`
-(712 frames), Qwen3-VL-8B, GPU/HIP OpenCV, `--vlm-interval 30`. Because the VLM stage is
-asynchronous (fire-and-forget in a background thread), it does not block the main loop — the
-pipeline sustains real-time FPS while VLM inference runs concurrently on the same GPU.
+**R9700 (gfx1201):**
 
-| GPU | VLM backend | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess | **FPS** |
-|-----|-------------|---------------------|----------------------|-------------|---------|
-| **R9700 (gfx1201)** | llama.cpp Q8_0 | 1.08 ms | 7.36 ms | 1.54 ms | **53.4** |
-| **W7900 (gfx1100)** | llama.cpp Q8_0 | 3.05 ms | 15.09 ms | 1.39 ms | **37.9** |
-| **W7900 (gfx1100)** | vLLM BF16 | 1.31 ms | 11.12 ms | 0.84 ms | **49.0** |
+| Video | VLM backend | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess | **FPS** |
+|-------|-------------|---------------------|---------------------|-------------|---------|
+| `sidewalk.mp4`  | vLLM BF16      | 1.34 ms | 11.87 ms | 0.74 ms | **46.8** |
+| `crossroad.mp4` | vLLM BF16      | 1.23 ms | 10.48 ms | 1.17 ms | **52.4** |
+| `street.mp4`    | vLLM BF16      | 1.33 ms | 10.64 ms | 1.33 ms | **47.1** |
+| `sidewalk.mp4`  | llama.cpp Q8_0 | 2.22 ms | 12.13 ms | 1.09 ms | **44.0** |
+| `crossroad.mp4` | llama.cpp Q8_0 | 2.19 ms | 11.58 ms | 1.25 ms | **47.6** |
+| `street.mp4`    | llama.cpp Q8_0 | 2.54 ms | 12.50 ms | 1.47 ms | **40.8** |
+| `sidewalk.mp4`  | llama.cpp BF16 | 2.34 ms | 13.86 ms | 0.92 ms | **40.7** |
+| `crossroad.mp4` | llama.cpp BF16 | 2.57 ms | 13.99 ms | 1.20 ms | **42.1** |
+| `street.mp4`    | llama.cpp BF16 | 2.91 ms | 16.15 ms | 1.43 ms | **35.2** |
 
-On R9700, CPU-fallback preprocessing (no HIP OpenCV) gives 50.4 FPS vs 53.4 FPS with
-GPU/HIP preprocessing. All configs exceed the 30 fps source rate (real-time).
-
-> The two W7900 rows share the same hardware but differ in how the co-located VLM server
-> contends for the GPU. With the llama.cpp server actively running on the same card, YOLO
-> detection is throttled to ~15 ms/frame; with vLLM (which idles between the sparse async
-> calls) detection runs at ~11 ms/frame. The measured pipeline FPS therefore reflects
-> **GPU contention from the co-located VLM server**, not raw YOLO throughput (see the
-> no-VLM Cross-GPU Comparison below for contention-free detection numbers).
+All configurations exceed the 30 fps source rate (real-time), on both GPUs and all three
+backends. FPS differences between backends come mainly from **GPU contention** — the
+co-located VLM server shares the card with YOLO/MIGraphX, so a heavier VLM (BF16 > Q8_0;
+llama.cpp keeps the GPU warmer than vLLM's sparse async calls) throttles detection somewhat.
+This reflects real single-GPU deployment, not raw contention-free YOLO throughput (see the
+no-VLM numbers above).
 
 > GPU preprocessing requires the HIP-enabled OpenCV 5.x build on the Python path
 > (`cv2.cuda.getCudaEnabledDeviceCount()` must return ≥ 1); otherwise the pipeline
@@ -409,7 +420,8 @@ ROI image, `max_tokens=100`:
 
 > The pipeline sends `VLM_TOP_K_ROIS=3` ROIs **serially** per VLM trigger, so one full VLM
 > cycle takes ≈ 3 × 582 ≈ **1.7 s** of wall-clock — but it runs asynchronously every 30 frames,
-> so the main loop still holds 53 FPS.
+> so the main loop still holds real-time FPS (40+ on R9700 with this Q8_0 backend; see the
+> full-pipeline table above).
 
 ### VLM Backend Comparison (single-concurrency, single ROI)
 

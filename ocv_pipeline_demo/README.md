@@ -359,17 +359,31 @@ Three free [Pexels](https://www.pexels.com/) videos (CC0 license, 1920x1080) cov
 
 ### Performance: Without VLM (`--no-vlm`)
 
-Tested on W7900 with all three sample videos. **FPS is end-to-end wall-clock** (includes video
-decode + encode I/O), so it is lower than the sum of the per-stage compute times below — the
-difference is the `VideoCapture.read()` / `VideoWriter.write()` overhead that is not counted in
-the per-stage timers. See the [Cross-GPU Comparison](#cross-gpu-comparison) for contention-free
-per-stage compute numbers.
+Tested on W7900 with all three sample videos. **FPS is end-to-end wall-clock.**
 
-| Video | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess | **FPS (end-to-end)** |
+**Fully GPU-resident path** (rocDecode hardware decode → zero-copy `cv::cuda` preprocess →
+MIGraphX detect → `cv::cuda::nms` postprocess → VA-API hardware encode). The frame never leaves
+the GPU on the hot path, so both the video I/O and the postprocessing overhead largely vanish:
+
+| Video | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess (GPU NMS) | **FPS (end-to-end)** |
 |-------|---------------------|---------------------|-------------|---------|
-| `sidewalk.mp4` | 1.71 ms | 6.93 ms | 0.27 ms | **65.3** |
-| `crossroad.mp4` | 1.63 ms | 6.90 ms | 0.17 ms | **72.0** |
-| `street.mp4` | 1.66 ms | 6.97 ms | 0.33 ms | **62.8** |
+| `sidewalk.mp4` | 0.40 ms | 7.53 ms | 0.25 ms | **79.4** |
+| `crossroad.mp4` | 0.35 ms | 7.39 ms | 0.17 ms | **81.6** |
+| `street.mp4` | 0.32 ms | 7.46 ms | 0.32 ms | **79.8** |
+
+**CPU video-I/O path** (`--video-decode cpu --video-encode cpu`, OpenCV FFmpeg + CPU NMS) — for
+comparison. The gap is the `VideoCapture.read()` / `VideoWriter.write()` overhead and the host
+upload in preprocessing:
+
+| Video | **FPS (end-to-end)** | vs GPU path |
+|-------|---------|-------------|
+| `sidewalk.mp4` | 65.5 | +21% with GPU I/O |
+| `crossroad.mp4` | 71.6 | +14% with GPU I/O |
+| `street.mp4` | 62.9 | +27% with GPU I/O |
+
+> The GPU-resident path drops preprocessing from ~1.7 ms to ~0.35 ms (zero-copy `GpuMat` over
+> the decoded surface, no host upload) and keeps NMS on the GPU at ~0.2–0.3 ms. The bulk of the
+> end-to-end speedup comes from moving video decode/encode onto the VCN engine.
 
 ### Performance: Full Pipeline with VLM (single-GPU)
 
@@ -379,6 +393,20 @@ background thread), so it does not block the main loop — the pipeline sustains
 while VLM inference runs concurrently on the same card. The per-frame VLM time below reflects
 the async **submit** cost (≈0–1 ms), *not* the real inference latency (see
 [VLM Inference Latency](#vlm-inference-latency-r9700-single-gpu) for that).
+
+**W7900 (gfx1100), fully GPU-resident path** (rocDecode + `cv::cuda` + MIGraphX +
+`cv::cuda::nms` + VA-API, async llama.cpp Q8_0 VLM). Even with the VLM server sharing the card,
+the main loop stays well above the 30 fps source rate:
+
+| Video | **FPS** |
+|-------|---------|
+| `sidewalk.mp4`  | **41.3** |
+| `crossroad.mp4` | **50.0** |
+| `street.mp4`    | **45.6** |
+
+The per-backend / per-stage tables below predate the GPU video-I/O and GPU-NMS work (they use
+CPU video decode and show higher preprocess/postprocess times); they remain useful for comparing
+VLM backends and the two GPUs.
 
 **W7900 (gfx1100):**
 

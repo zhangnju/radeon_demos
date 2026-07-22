@@ -25,10 +25,11 @@ import cv2
 import numpy as np
 
 import config
-from preprocess import preprocess_frame, preprocess_frame_cpu
+from preprocess import preprocess_frame, preprocess_frame_cpu, preprocess_frame_gpu_resident
 from detector import YOLODetector
 from vlm_client import AsyncVLMClient
 from postprocess import draw_detections, draw_scene_panel, draw_stats
+from video_io import make_reader, make_writer
 
 
 def check_gpu():
@@ -92,6 +93,14 @@ def parse_args():
         "--device", type=int, default=0,
         help="GPU device ID (default: 0)",
     )
+    parser.add_argument(
+        "--video-decode", default="auto", choices=["auto", "rocdecode", "cpu"],
+        help="Video decode backend: 'rocdecode' (GPU/VCN), 'cpu' (OpenCV), or 'auto'",
+    )
+    parser.add_argument(
+        "--video-encode", default="auto", choices=["auto", "vaapi", "cpu"],
+        help="Video encode backend: 'vaapi' (GPU/VCN), 'cpu' (OpenCV), or 'auto'",
+    )
     return parser.parse_args()
 
 
@@ -110,26 +119,41 @@ def main():
     # --- Check GPU ---
     has_gpu = check_gpu()
 
-    # --- Open video input ---
+    # --- Resolve input source ---
     try:
         src = int(args.input)
+        is_file = False
     except ValueError:
         src = args.input
-    cap = cv2.VideoCapture(src)
-    if not cap.isOpened():
+        is_file = True
+
+    # Read metadata via a short-lived OpenCV handle (fps / size / frame count).
+    _meta = cv2.VideoCapture(src)
+    if not _meta.isOpened():
         print(f"[pipeline] ERROR: cannot open input: {args.input}")
         sys.exit(1)
+    fps_in = _meta.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(_meta.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(_meta.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(_meta.get(cv2.CAP_PROP_FRAME_COUNT))
+    _meta.release()
 
-    fps_in = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    print(f"[pipeline] Input: {args.input} ({width}x{height} @ {fps_in:.1f}fps, {total_frames} frames)")
+    # --- Open video input (GPU rocDecode when available/requested) ---
+    want_gpu_decode = has_gpu and is_file and args.video_decode in ("auto", "rocdecode")
+    reader, dec_kind = make_reader(src, device_id=args.device, prefer_gpu=want_gpu_decode)
+    if args.video_decode == "rocdecode" and dec_kind != "rocdecode":
+        print("[pipeline] ERROR: rocDecode requested but unavailable")
+        sys.exit(1)
+    print(f"[pipeline] Input: {args.input} ({width}x{height} @ {fps_in:.1f}fps, "
+          f"{total_frames} frames) | decode: {dec_kind}")
 
-    # --- Init video writer ---
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(args.output, fourcc, fps_in, (width, height))
-    print(f"[pipeline] Output: {args.output}")
+    # --- Init video writer (GPU VA-API when available/requested) ---
+    want_gpu_encode = args.video_encode in ("auto", "vaapi")
+    writer, enc_kind = make_writer(args.output, width, height, fps_in, prefer_gpu=want_gpu_encode)
+    if args.video_encode == "vaapi" and enc_kind != "vaapi":
+        print("[pipeline] ERROR: VA-API encode requested but unavailable")
+        sys.exit(1)
+    print(f"[pipeline] Output: {args.output} | encode: {enc_kind}")
 
     # --- Init YOLO detector ---
     print()
@@ -153,7 +177,10 @@ def main():
     print("[pipeline] Starting pipeline...")
     print("-" * 70)
 
+    gpu_decode = dec_kind == "rocdecode"
     preprocess_fn = preprocess_frame if has_gpu else preprocess_frame_cpu
+    if gpu_decode:
+        import torch
 
     # --- Timing accumulators ---
     t_preprocess = 0.0
@@ -166,7 +193,10 @@ def main():
     t_start = time.time()
 
     while True:
-        ret, frame = cap.read()
+        if gpu_decode:
+            ret, rgb_gpu = reader.read_gpu()   # (H, W, 3) uint8 RGB on GPU
+        else:
+            ret, frame = reader.read()
         if not ret:
             break
 
@@ -174,14 +204,22 @@ def main():
         if args.max_frames > 0 and frame_count > args.max_frames:
             break
 
-        # --- Stage 1: GPU Preprocessing ---
+        # --- Stage 1: Preprocessing + Stage 2: Detection ---
         t0 = time.time()
-        blob, scale, pad_w, pad_h = preprocess_fn(frame)
-        t1 = time.time()
-        t_preprocess += t1 - t0
-
-        # --- Stage 2: YOLO Detection ---
-        detections = detector.detect_and_parse(blob, scale, pad_w, pad_h, frame.shape)
+        if gpu_decode:
+            # GPU-resident: decode tensor -> preprocess (torch) -> detect (zero-copy)
+            blob_gpu, scale, pad_w, pad_h = preprocess_frame_gpu_resident(rgb_gpu, config.INPUT_SIZE)
+            orig_shape = (int(rgb_gpu.shape[0]), int(rgb_gpu.shape[1]), 3)
+            t1 = time.time()
+            t_preprocess += t1 - t0
+            detections = detector.detect_and_parse_gpu(blob_gpu, scale, pad_w, pad_h, orig_shape)
+            # One D2H copy for the CPU overlay/VLM stages (draw + JPEG encode are CPU)
+            frame = cv2.cvtColor(rgb_gpu.cpu().numpy(), cv2.COLOR_RGB2BGR)
+        else:
+            blob, scale, pad_w, pad_h = preprocess_fn(frame)
+            t1 = time.time()
+            t_preprocess += t1 - t0
+            detections = detector.detect_and_parse(blob, scale, pad_w, pad_h, frame.shape)
         t2 = time.time()
         t_detect += t2 - t1
 
@@ -226,7 +264,7 @@ def main():
             print(f"  Frame {frame_count}/{total_frames} | FPS: {current_fps:.1f} | Dets: {len(detections)}")
 
     # --- Cleanup ---
-    cap.release()
+    reader.release()
     writer.release()
     if args.display:
         cv2.destroyAllWindows()
@@ -237,6 +275,7 @@ def main():
     print("=" * 70)
     print(f"  Pipeline Complete")
     print(f"  Frames: {frame_count} | Total: {total_time:.2f}s | Avg FPS: {frame_count/total_time:.1f}")
+    print(f"  Video decode:    {dec_kind}   |   Video encode: {enc_kind}")
     print(f"  Avg Preprocess:  {t_preprocess/frame_count*1000:.2f}ms/frame {'(GPU/HIP)' if has_gpu else '(CPU)'}")
     print(f"  Avg Detection:   {t_detect/frame_count*1000:.2f}ms/frame ({detector.backend})")
     if vlm:

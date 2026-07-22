@@ -4,7 +4,7 @@ A fully GPU-accelerated vision AI pipeline running on AMD Radeon GPUs via ROCm/H
 
 - **OpenCV 5.x cv::cuda/HIP** — GPU-accelerated image preprocessing
 - **MIGraphX FP16** — YOLO26x object detection on GPU (zero-copy)
-- **Qwen3-VL + vLLM** — Vision-Language Model scene understanding on GPU
+- **Qwen3-VL + vLLM / llama.cpp** — Vision-Language Model scene understanding on GPU
 
 ```
 Video Input
@@ -23,7 +23,7 @@ YOLO26x (MIGraphX FP16, zero-copy)
 NMS + ROI Crop (OpenCV)
     │
     ▼
-Qwen3-VL (ROCm vLLM)
+Qwen3-VL (vLLM or llama.cpp, ROCm/HIP)
   • Scene/object description per ROI
     │
     ▼
@@ -46,7 +46,9 @@ Overlay + Output Video
 - Container: `rocm/vllm-dev:rocm7.2.1_navi_ubuntu24.04_py3.12_pytorch_2.9_vllm_0.16.0`
 - Models:
   - YOLO26x ONNX model at `/home/yolo26x.onnx` (213 MB, input [1,3,640,640], output [1,300,6])
-  - Qwen3-VL-8B-Instruct at `/models/Qwen3-VL-8B-Instruct`
+  - VLM weights, depending on backend:
+    - **vLLM**: Qwen3-VL-8B-Instruct (HF format) at `/models/Qwen3-VL-8B-Instruct`
+    - **llama.cpp**: GGUF weights + mmproj at `/models/` (e.g. `Qwen3-VL-8B-Instruct-Q8_0.gguf` + `mmproj-F16.gguf`; see Step 5b)
 
 ## Setup
 
@@ -244,6 +246,14 @@ Verify with:
 curl http://localhost:8199/v1/models
 ```
 
+> **Multi-GPU note:** `llama-server` ignores `HIP_VISIBLE_DEVICES` — it always enumerates
+> all cards and defaults to device 0. To pin it to a specific GPU, use its native flags:
+> run `llama-server --list-devices` to see the `ROCm0..N` indices, then add
+> `--device ROCmN`. Note that llama.cpp's `ROCmN` ordering may differ from `rocm-smi`'s
+> `GPU[N]` and from the pipeline's `HIP_VISIBLE_DEVICES` index, so to co-locate the pipeline
+> and the VLM server on the *same* physical card, confirm the mapping (e.g. watch
+> `rocm-smi --showmemuse` while each process loads).
+
 ## Sample Videos
 
 Download free test videos from [Pexels](https://www.pexels.com/) (CC0 license, no registration needed):
@@ -283,7 +293,7 @@ PYTHONPATH=/opt/opencv5/lib/python3.12/site-packages:/opt/rocm/lib \
 | `--input`, `-i` | (required) | Video file, RTSP URL, or camera index |
 | `--output`, `-o` | `output.mp4` | Output video path |
 | `--no-vlm` | off | Skip VLM stage entirely |
-| `--vlm-backend` | `vllm` | VLM backend: `vllm` or `llamacpp` |
+| `--vlm-backend` | (from config) | VLM backend: `vllm` or `llamacpp` (falls back to `config.VLM_BACKEND`, currently `vllm`) |
 | `--vlm-url` | (from config) | Override VLM server base URL |
 | `--vlm-model` | (from config) | Override VLM model name (`auto` for llama.cpp auto-detect) |
 | `--max-frames` | 0 (all) | Limit frames to process |
@@ -312,7 +322,7 @@ python3 pipeline.py --input sidewalk.mp4 --output out.mp4 \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HIP_VISIBLE_DEVICES` | all | Select GPU (e.g., `3` for 4th GPU) |
+| `HIP_VISIBLE_DEVICES` | all | Select GPU for the pipeline (e.g., `3` for 4th GPU). Note: `llama-server` ignores this — use its `--device ROCmN` flag instead (see Step 5b). |
 | `YOLO_BACKEND` | `auto` | Force `migraphx` or `ort` |
 
 ## Demo
@@ -349,13 +359,17 @@ Three free [Pexels](https://www.pexels.com/) videos (CC0 license, 1920x1080) cov
 
 ### Performance: Without VLM (`--no-vlm`)
 
-Tested on W7900 with all three sample videos:
+Tested on W7900 with all three sample videos. **FPS is end-to-end wall-clock** (includes video
+decode + encode I/O), so it is lower than the sum of the per-stage compute times below — the
+difference is the `VideoCapture.read()` / `VideoWriter.write()` overhead that is not counted in
+the per-stage timers. See the [Cross-GPU Comparison](#cross-gpu-comparison) for contention-free
+per-stage compute numbers.
 
-| Video | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess | **FPS** |
+| Video | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess | **FPS (end-to-end)** |
 |-------|---------------------|---------------------|-------------|---------|
-| `sidewalk.mp4` | 2.21 ms | 6.85 ms | 0.43 ms | **60.5** |
-| `crossroad.mp4` | 2.18 ms | 6.83 ms | 0.35 ms | **67.6** |
-| `street.mp4` | 2.25 ms | 6.85 ms | 0.52 ms | **57.7** |
+| `sidewalk.mp4` | 1.71 ms | 6.93 ms | 0.27 ms | **65.3** |
+| `crossroad.mp4` | 1.63 ms | 6.90 ms | 0.17 ms | **72.0** |
+| `street.mp4` | 1.66 ms | 6.97 ms | 0.33 ms | **62.8** |
 
 ### Performance: Full Pipeline with VLM (single-GPU)
 
@@ -454,12 +468,16 @@ Qwen3-VL generates natural language descriptions for the top-3 detected ROIs eve
 
 ### Cross-GPU Comparison
 
+Per-stage **compute time only** (excludes video decode/encode I/O), so the derived FPS is
+higher than the end-to-end `--no-vlm` numbers above. Use this table to compare raw GPU
+compute across architectures; use the end-to-end tables for real throughput.
+
 | Stage | W7900 (gfx1100) | R9700 (gfx1201) | Backend |
 |-------|-----------------|-----------------|---------|
 | GPU Preprocess | **1.93 ms** | 2.45 ms | OpenCV 5.x cv::cuda/HIP |
 | YOLO Detection | **6.82 ms** | 5.34 ms | MIGraphX FP16 zero-copy |
 | Postprocess | 0.34 ms | 0.66 ms | CPU (NMS + draw) |
-| **Total FPS (no VLM)** | **91.9** | **91.1** | |
+| **Total FPS (compute only, no VLM)** | **91.9** | **91.1** | |
 
 ### MIGraphX vs PyTorch GPU (W7900)
 

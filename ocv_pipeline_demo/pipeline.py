@@ -70,8 +70,9 @@ def parse_args():
         help="Skip VLM stage for faster processing",
     )
     parser.add_argument(
-        "--vlm-backend", default=None, choices=["vllm", "llamacpp"],
-        help="VLM inference backend: 'vllm' (default) or 'llamacpp'",
+        "--vlm-backend", default=None, choices=["vllm", "llamacpp", "llamacpp-ipc"],
+        help="VLM inference backend: 'vllm' (default), 'llamacpp', or "
+             "'llamacpp-ipc' (zero-copy GPU image input via HIP IPC)",
     )
     parser.add_argument(
         "--vlm-url", default=None,
@@ -225,7 +226,12 @@ def main():
 
         # --- Stage 3: VLM (async, periodic) ---
         if vlm and detections and (frame_count % args.vlm_interval == 0 or frame_count == 1):
-            vlm.submit_rois(frame.copy(), detections)
+            if getattr(vlm, "is_gpu_ipc", False) and gpu_decode:
+                # zero-copy: crop + preprocess ROIs on the GPU, share via HIP IPC.
+                # clone so the tensor stays valid while the async call runs.
+                vlm.submit_rois_gpu(rgb_gpu.clone(), detections)
+            else:
+                vlm.submit_rois(frame.copy(), detections)
         if vlm:
             vlm_descriptions = vlm.get_latest()
         t3 = time.time()

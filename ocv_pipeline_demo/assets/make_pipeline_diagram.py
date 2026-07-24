@@ -16,27 +16,28 @@ STAGE    = "#111827"
 ACCENT_DEC = "#1864ab"   # blue   – video decode (VCN)
 ACCENT_PRE = "#0b7285"   # teal   – preprocess
 ACCENT_DET = "#c92a2a"   # red    – detection
+ACCENT_NMS = "#a61e4d"   # magenta – GPU NMS (cv::cuda::nms)
 ACCENT_VLM = "#5f3dc4"   # violet – VLM
 ACCENT_ENC = "#1864ab"   # blue   – video encode (VCN)
 ACCENT_OUT = "#2b8a3e"   # green  – output
 FAINT      = "#98a2b3"   # de-emphasized CPU steps
 FAINT_BG   = "#f4f6f9"
 
-fig, ax = plt.subplots(figsize=(17, 6.6), dpi=150)
-ax.set_xlim(0, 17)
+fig, ax = plt.subplots(figsize=(19.5, 6.6), dpi=150)
+ax.set_xlim(0, 19.5)
 ax.set_ylim(0, 6.6)
 ax.axis("off")
 fig.patch.set_facecolor("#ffffff")
 
 # ---------------------------------------------------------------- title
-ax.text(8.5, 6.25, "End-to-End Vision AI Pipeline on a Single AMD Radeon GPU",
+ax.text(9.75, 6.25, "End-to-End Vision AI Pipeline on a Single AMD Radeon GPU",
         ha="center", va="center", fontsize=18, fontweight="bold", color=INK)
-ax.text(8.5, 5.78,
+ax.text(9.75, 5.78,
         "Decode · preprocess · detect · describe · encode — the full chain on one GPU via ROCm/HIP",
         ha="center", va="center", fontsize=11, color=MUTED)
 
 # ---------------------------------------------------------------- GPU boundary box
-gpu = FancyBboxPatch((0.35, 1.15), 16.3, 4.05,
+gpu = FancyBboxPatch((0.35, 1.15), 18.8, 4.05,
                      boxstyle="round,pad=0.02,rounding_size=0.15",
                      linewidth=2.0, edgecolor=GPU_EDGE, facecolor=GPU_BG, zorder=0)
 ax.add_patch(gpu)
@@ -89,27 +90,30 @@ def harrow(x0, x1, faint=False):
         linewidth=1.3 if faint else 2.0,
         color=FAINT if faint else MUTED, zorder=2))
 
-# x-centers across the row: 6 GPU cards + 2 light steps interleaved
-# order: decode -> preprocess -> detect -> [NMS+ROI] -> VLM -> [overlay] -> encode
+# x-centers across the row: 5 GPU cards + 2 light CPU steps interleaved
+# order: decode -> preprocess -> detect -> NMS(GPU) -> [ROI crop] -> VLM -> [overlay] -> encode
 x_dec = 2.05
 x_pre = 4.55
 x_det = 7.05
-x_nms = 9.15
-x_vlm = 11.35
-x_ovl = 13.5
-x_enc = 15.35
+x_nms = 9.55
+x_roi = 11.65
+x_vlm = 13.85
+x_ovl = 16.0
+x_enc = 17.85
 
 harrow(x_dec + W/2, x_pre - W/2)
 harrow(x_pre + W/2, x_det - W/2)
-harrow(x_det + W/2, x_nms - LW/2, faint=True)
-harrow(x_nms + LW/2, x_vlm - W/2, faint=True)
+harrow(x_det + W/2, x_nms - W/2)
+harrow(x_nms + W/2, x_roi - LW/2, faint=True)
+harrow(x_roi + LW/2, x_vlm - W/2, faint=True)
 harrow(x_vlm + W/2, x_ovl - LW/2, faint=True)
 harrow(x_ovl + LW/2, x_enc - W/2, faint=True)
 
 heavy(x_dec, "Video Decode", "H.264 / HEVC\nbitstream", "rocDecode · VCN", ACCENT_DEC)
 heavy(x_pre, "Preprocess", "letterbox · RGB\nnormalize", "cv::cuda / HIP", ACCENT_PRE)
 heavy(x_det, "YOLO26x Detect", "300 boxes,\nzero-copy", "MIGraphX FP16", ACCENT_DET)
-light(x_nms, "NMS + ROI crop", "CPU · OpenCV")
+heavy(x_nms, "NMS", "class-aware\nsuppression", "cv::cuda::nms", ACCENT_NMS)
+light(x_roi, "ROI crop", "CPU (JPEG) / GPU (IPC)")
 heavy(x_vlm, "Qwen3-VL", "per-ROI text\nasync", "vLLM | llama.cpp", ACCENT_VLM)
 light(x_ovl, "Overlay draw", "CPU · OpenCV")
 heavy(x_enc, "Video Encode", "annotated\nH.264 stream", "VA-API · VCN", ACCENT_ENC)
@@ -122,11 +126,11 @@ ax.text(0.05, CY + 0.42, "Video In", ha="left", va="center",
 ax.text(0.05, CY - 0.42, "file·RTSP·cam", ha="left", va="center",
         fontsize=8, color=MUTED, style="italic")
 
-ax.annotate("", xy=(16.95, CY), xytext=(x_enc + W/2, CY),
+ax.annotate("", xy=(19.45, CY), xytext=(x_enc + W/2, CY),
             arrowprops=dict(arrowstyle="-|>", color=ACCENT_OUT, lw=2.0))
-ax.text(16.92, CY + 0.42, "Output", ha="right", va="center",
+ax.text(19.42, CY + 0.42, "Output", ha="right", va="center",
         fontsize=9.5, fontweight="bold", color=ACCENT_OUT)
-ax.text(16.92, CY - 0.42, "annotated .mp4", ha="right", va="center",
+ax.text(19.42, CY - 0.42, "annotated .mp4", ha="right", va="center",
         fontsize=8, color=MUTED, style="italic")
 
 # async VLM note (below VLM card)
@@ -141,7 +145,7 @@ ax.text(0.62, 1.42,
         ha="left", va="center", fontsize=8.6, color=MUTED, style="italic")
 
 # footer
-ax.text(8.5, 0.55,
+ax.text(9.75, 0.55,
         "rocDecode hardware decode  ·  zero-copy GPU-resident inference  ·  "
         "VA-API hardware encode  ·  pluggable VLM backend",
         ha="center", va="center", fontsize=9, color=MUTED)

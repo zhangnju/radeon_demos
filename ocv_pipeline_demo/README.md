@@ -1,5 +1,7 @@
 # Building an End-to-End Vision AI Pipeline on AMD Radeon with OpenCV 5
 
+English | [中文](README_CN.md)
+
 A fully GPU-accelerated vision AI pipeline running on AMD Radeon GPUs via ROCm/HIP, demonstrating:
 
 - **OpenCV 5.x cv::cuda/HIP** — GPU-accelerated image preprocessing
@@ -20,7 +22,7 @@ YOLO26x (MIGraphX FP16, zero-copy)
   • 300 detections × [x1,y1,x2,y2,score,class]
     │
     ▼
-NMS + ROI Crop (OpenCV)
+NMS (cv::cuda::nms, GPU) + ROI Crop (CPU on JPEG path / GPU on llamacpp-ipc path)
     │
     ▼
 Qwen3-VL (vLLM or llama.cpp, ROCm/HIP)
@@ -62,12 +64,17 @@ pip install onnxruntime
 
 ### Step 2: Clone OpenCV 5.x with HIP Support
 
-The `5.x-hip` branches contain Jeff Daily's HIP core patches (PR [#29285](https://github.com/opencv/opencv/pull/29285)) cherry-picked onto OpenCV 5.x. The `opencv_contrib` `5.x-hip` branch already includes all 5.x compatibility fixes (namespace doubling, `DataType<uint>` guard, 64-bit integer `VecTraits`/`MakeVec`/`saturate_cast`, geometry API include, and `stereo` module removal) — no manual patches needed.
+The `5.x-hip` branches contain Jeff Daily's HIP core patches (PR [#29285](https://github.com/opencv/opencv/pull/29285)) cherry-picked onto OpenCV 5.x, plus the 5.x compatibility fixes, `cv::cuda::nms`, and (contrib) the `align_corners` resize option needed by the zero-copy VLM path. No manual patches needed.
+
+For `opencv_contrib` the demo uses the **`5.x-hip-zerocopy`** branch — it is `5.x-hip`
+plus the `align_corners` commit ([opencv_contrib#4181](https://github.com/opencv/opencv_contrib/pull/4181)); `align_corners`
+defaults to off, so it behaves identically to `5.x-hip` for everything except the
+zero-copy `llamacpp-ipc` path. (Upstream the two are separate PRs: [#4178](https://github.com/opencv/opencv_contrib/pull/4178) HIP port + `cv::cuda::nms`, and [#4181](https://github.com/opencv/opencv_contrib/pull/4181) align_corners.)
 
 ```bash
 cd /home
 git clone -b 5.x-hip https://github.com/zhangnju/opencv.git
-git clone -b 5.x-hip https://github.com/zhangnju/opencv_contrib.git
+git clone -b 5.x-hip-zerocopy https://github.com/zhangnju/opencv_contrib.git
 ```
 
 <details>
@@ -128,6 +135,14 @@ template <typename T> __device__ __forceinline__ T saturate_cast(unsigned long v
 File: `modules/cudawarping/src/warp.cpp` — add `#include "opencv2/geometry/2d.hpp"` (invertAffineTransform moved to geometry module in 5.x)
 
 **f. Remove duplicate stereo module** (moved to opencv core in 5.x)
+
+**g. New GPU primitives / options added on top of the port (this project's contrib work):**
+
+- `cv::cuda::nms` — GPU non-maximum suppression (class-aware IoU bitmask kernel), enabling GPU-resident detection post-processing. On `5.x-hip` / [opencv_contrib#4178](https://github.com/opencv/opencv_contrib/pull/4178).
+- Fix for a duplicate `long`/`ulong` `VecTraits`/`MakeVec`/`saturate_cast` and a missing `CV_32U` `#endif` that broke a fresh 5.x-hip build. On `5.x-hip` / #4178.
+- `align_corners` option for `cv::cuda::resize` (truncating-linear kernel, PyTorch/reference-bilinear parity) — required by the zero-copy `llamacpp-ipc` VLM path. Separate PR [opencv_contrib#4181](https://github.com/opencv/opencv_contrib/pull/4181); folded into the `5.x-hip-zerocopy` branch used above.
+
+> Core-side (opencv main repo, [#29527](https://github.com/opencv/opencv/pull/29527)): the 5.x HIP compat fixes and `GpuMat.fromDevicePointer` (zero-copy wrap of external GPU memory) live on the `zhangnju/opencv` `5.x-hip` branch cloned in Step 2.
 
 </details>
 
@@ -293,7 +308,7 @@ PYTHONPATH=/opt/opencv5/lib/python3.12/site-packages:/opt/rocm/lib \
 | `--input`, `-i` | (required) | Video file, RTSP URL, or camera index |
 | `--output`, `-o` | `output.mp4` | Output video path |
 | `--no-vlm` | off | Skip VLM stage entirely |
-| `--vlm-backend` | (from config) | VLM backend: `vllm` or `llamacpp` (falls back to `config.VLM_BACKEND`, currently `vllm`) |
+| `--vlm-backend` | (from config) | VLM backend: `vllm`, `llamacpp`, or `llamacpp-ipc` (zero-copy GPU image input via HIP IPC; falls back to `config.VLM_BACKEND`, currently `vllm`) |
 | `--vlm-url` | (from config) | Override VLM server base URL |
 | `--vlm-model` | (from config) | Override VLM model name (`auto` for llama.cpp auto-detect) |
 | `--max-frames` | 0 (all) | Limit frames to process |
@@ -359,17 +374,28 @@ Three free [Pexels](https://www.pexels.com/) videos (CC0 license, 1920x1080) cov
 
 ### Performance: Without VLM (`--no-vlm`)
 
-Tested on W7900 with all three sample videos. **FPS is end-to-end wall-clock.**
+Tested on W7900 and R9700 with all three sample videos. **FPS is end-to-end wall-clock.**
 
 **Fully GPU-resident path** (rocDecode hardware decode → zero-copy `cv::cuda` preprocess →
 MIGraphX detect → `cv::cuda::nms` postprocess → VA-API hardware encode). The frame never leaves
-the GPU on the hot path, so both the video I/O and the postprocessing overhead largely vanish:
+the GPU on the hot path, so both the video I/O and the postprocessing overhead largely vanish.
+
+**W7900 (gfx1100):**
 
 | Video | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess (GPU NMS) | **FPS (end-to-end)** |
 |-------|---------------------|---------------------|-------------|---------|
-| `sidewalk.mp4` | 0.40 ms | 7.53 ms | 0.25 ms | **79.4** |
-| `crossroad.mp4` | 0.35 ms | 7.39 ms | 0.17 ms | **81.6** |
-| `street.mp4` | 0.32 ms | 7.46 ms | 0.32 ms | **79.8** |
+| `sidewalk.mp4` | 0.38 ms | 7.58 ms | 0.26 ms | **78.2** |
+| `crossroad.mp4` | 0.34 ms | 7.35 ms | 0.16 ms | **82.4** |
+| `street.mp4` | 0.34 ms | 7.49 ms | 0.31 ms | **79.0** |
+
+**R9700 (gfx1201)** — RDNA4's faster MIGraphX detection (~5.7 ms vs ~7.5 ms) pushes the
+end-to-end rate close to 100 fps on an unshared card:
+
+| Video | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess (GPU NMS) | **FPS (end-to-end)** |
+|-------|---------------------|---------------------|-------------|---------|
+| `sidewalk.mp4` | 0.39 ms | 5.83 ms | 0.31 ms | **92.1** |
+| `crossroad.mp4` | 0.35 ms | 5.65 ms | 0.18 ms | **98.7** |
+| `street.mp4` | 0.36 ms | 5.76 ms | 0.37 ms | **94.8** |
 
 **CPU video-I/O path** (`--video-decode cpu --video-encode cpu`, OpenCV FFmpeg + CPU NMS) — for
 comparison. The gap is the `VideoCapture.read()` / `VideoWriter.write()` overhead and the host
@@ -403,6 +429,16 @@ the main loop stays well above the 30 fps source rate:
 | `sidewalk.mp4`  | **41.3** |
 | `crossroad.mp4` | **50.0** |
 | `street.mp4`    | **45.6** |
+
+**R9700 (gfx1201), fully GPU-resident path** (rocDecode + `cv::cuda` + MIGraphX + `cv::cuda::nms`
++ VA-API, async vLLM BF16 Qwen3-VL-8B co-located on the same card). The async VLM never blocks
+the main loop; GPU contention lifts detection to ~11 ms but the pipeline still holds ~60 fps:
+
+| Video | Preprocess (GPU/HIP) | Detection (MIGraphX) | Postprocess | **FPS** |
+|-------|---------------------|---------------------|-------------|---------|
+| `sidewalk.mp4`  | 0.64 ms | 11.97 ms | 0.58 ms | **57.7** |
+| `crossroad.mp4` | 0.52 ms | 10.98 ms | 1.42 ms | **60.2** |
+| `street.mp4`    | 0.54 ms | 11.08 ms | 1.54 ms | **58.8** |
 
 The per-backend / per-stage tables below predate the GPU video-I/O and GPU-NMS work (they use
 CPU video decode and show higher preprocess/postprocess times); they remain useful for comparing
@@ -460,10 +496,11 @@ ROI image, `max_tokens=100`:
 | ├─ Prompt eval (incl. image encode) | ~100–150 ms | 280–1150 tok/s |
 | └─ Generation | ~400–540 ms | **~58 tok/s** (25–31 tokens) |
 
-> The pipeline sends `VLM_TOP_K_ROIS=3` ROIs **serially** per VLM trigger, so one full VLM
-> cycle takes ≈ 3 × 582 ≈ **1.7 s** of wall-clock — but it runs asynchronously every 30 frames,
-> so the main loop still holds real-time FPS (40+ on R9700 with this Q8_0 backend; see the
-> full-pipeline table above).
+> The pipeline sends `VLM_TOP_K_ROIS=3` ROIs per VLM trigger. These requests are dispatched
+> **concurrently** (see [Concurrent ROI Dispatch](#concurrent-roi-dispatch) below), so one full
+> VLM cycle is well under 3× the single-ROI latency. The whole VLM stage also runs
+> asynchronously every 30 frames, so the main loop still holds real-time FPS (40+ on R9700 with
+> this Q8_0 backend; see the full-pipeline table above).
 
 ### VLM Backend Comparison (single-concurrency, single ROI)
 
@@ -483,6 +520,98 @@ Same model, single ROI, `max_tokens=100`, per-request latency (client end-to-end
 > concurrency. Output quality is equivalent across backends and precisions. Notably, W7900's
 > larger VRAM (48 GB) and mature RDNA3 llama.cpp path give it slightly lower VLM latency than
 > R9700, even though R9700 is faster on the CV/YOLO pipeline stages.
+
+### Concurrent ROI Dispatch
+
+Each VLM trigger describes the top-`VLM_TOP_K_ROIS` (default 3) detections. The client sends
+those requests **concurrently** (a `ThreadPoolExecutor` over the per-ROI HTTP calls) so the
+server can process them across its parallel slots via continuous batching, instead of
+one-at-a-time. On the GPU-IPC path the GPU preprocess + IPC export still run serially per ROI
+(cv::cuda / hipMalloc on a shared context are not thread-safe); only the HTTP requests are
+parallelized — that's where the ~0.6 s/ROI latency lives.
+
+Per-trigger latency for 3 ROIs (R9700, Q8_0, `max_tokens=100`, `llama-server --parallel 3`):
+
+| Dispatch | Per-trigger latency (3 ROIs) | Speedup |
+|----------|------------------------------|---------|
+| Serial (3× sequential HTTP) | 2241 ms | 1× |
+| **Concurrent (3× parallel HTTP)** | **1315 ms** | **1.70×** |
+
+> The speedup is ~1.7×, not 3×: the server and pipeline share **one GPU**, so the vision-encoder
+> + generation compute for the 3 requests is still largely serialized on the device — concurrency
+> mainly overlaps prompt-eval and scheduling. It shortens each scene-description refresh, and
+> since the VLM stage is async it never blocks the main loop's FPS.
+>
+> **`--parallel` VRAM tradeoff:** true concurrency needs `--parallel N` ≥ the number of ROIs
+> (else extras queue), and each slot reserves its own KV cache. Going from `--parallel 2 -c 8192`
+> to `--parallel 3 -c 12288` costs more VRAM — the very budget you capped to leave room for
+> MIGraphX on a shared single GPU. Balance `--parallel` / `-c` against how much VRAM the
+> co-located pipeline needs; on a dedicated VLM GPU you can raise both freely.
+
+### Zero-Copy VLM Image Input (HIP IPC)
+
+Normally each ROI is JPEG-encoded, base64'd, and sent to the VLM server over HTTP,
+where it is decoded and CPU-preprocessed (resize/normalize) before the vision
+encoder. The `llamacpp-ipc` backend removes all of that: the ROI stays on the GPU,
+is preprocessed on the GPU with `cv::cuda` (numerically identical to llama.cpp's
+CPU preprocess — verified element-wise), and is shared with the co-located
+llama-server via a **HIP IPC handle**. Only a 64-byte handle travels over HTTP; the
+server maps the same VRAM and feeds the vision encoder directly — no JPEG, no
+pixel copy to the host, no server-side preprocess.
+
+This backend needs a llama-server built from the **`vlm_zerocopy` branch of the
+[zhangnju/llama.cpp](https://github.com/zhangnju/llama.cpp/tree/vlm_zerocopy)
+fork**, which adds the HIP-IPC / preprocessed-image path to the multimodal server
+(`server-ipc.{cpp,h}` + an `mtmd_bitmap_init_preprocessed` bypass). Stock
+`ggml-org/llama.cpp` only supports the JPEG `llamacpp` backend above.
+
+```bash
+# build the patched server (same ROCm/HIP flags as the stock build in Step 5b)
+git clone -b vlm_zerocopy https://github.com/zhangnju/llama.cpp.git
+cd llama.cpp
+cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1201 -DCMAKE_BUILD_TYPE=Release  # gfx1100 for W7900
+cmake --build build --target llama-server -j$(nproc)
+
+# start it (single-GPU: cap KV cache so the pipeline's MIGraphX has room)
+HIP_VISIBLE_DEVICES=2 ./build/bin/llama-server \
+    -m /models/Qwen3-VL-8B-Instruct-GGUF/Qwen3-VL-8B-Instruct-Q8_0.gguf \
+    --mmproj /models/Qwen3-VL-8B-Instruct-GGUF/mmproj-F16.gguf \
+    -ngl 99 -c 8192 --parallel 2 --port 8199 --host 0.0.0.0
+
+# run the pipeline on the SAME physical GPU
+python3 pipeline.py --input street.mp4 --vlm-backend llamacpp-ipc \
+    --vlm-url http://localhost:8199
+```
+
+> The pipeline and llama-server **must share the same physical GPU** (HIP IPC maps
+> VRAM within one device). Bit-exact preprocess parity with the server relies on the
+> `align_corners` option in `cv::cuda::resize`
+> ([opencv_contrib#4181](https://github.com/opencv/opencv_contrib/pull/4181)), which
+> is already included if you cloned the `5.x-hip-zerocopy` contrib branch in Step 2.
+
+**Client-side image ingestion cost** — the part zero-copy actually changes (the
+per-image work to get pixels ready to send). JPEG encode+base64 scales with
+resolution; the IPC path is a flat 64-byte handle:
+
+| Image size | JPEG encode+base64 | IPC export | Speedup | HTTP payload |
+|-----------|-------------------|-----------|---------|--------------|
+| 320×240   | 0.17 ms | 0.09 ms | 1.8× | 415× smaller |
+| 640×480   | 0.73 ms | 0.27 ms | 2.7× | 1396× smaller |
+| 1280×720  | 2.02 ms | 0.41 ms | 4.9× | 3235× smaller |
+| 1920×1080 | 4.33 ms | 0.50 ms | **8.6×** | 6383× smaller |
+| 3840×2160 | 13.53 ms | 1.01 ms | **13.4×** | **14220× smaller** |
+
+> JPEG encoding grows ~linearly with resolution (13.5 ms at 4K), while the IPC
+> export stays essentially constant (always an 88-byte base64 handle). The bigger
+> the frame, the bigger the win; the transferred payload shrinks by 3–4 orders of
+> magnitude (4K: 1.2 MB base64 → 88 bytes).
+>
+> **When it matters:** the end-to-end gain at the demo's default load
+> (interval-30, one small ROI) is negligible because the VLM's vision-encoder
+> forward dominates. The zero-copy path pays off with **large (4K) frames, many
+> ROIs per request, or client-CPU / bandwidth-constrained multi-stream
+> deployments**, where per-image JPEG encode and MB-scale transfer would otherwise
+> saturate the CPU/NIC.
 
 ### VLM Scene Understanding Examples
 
@@ -567,7 +696,12 @@ ocv_pipeline_demo/
 
 ## Source Code
 
-- OpenCV 5.x + HIP: [zhangnju/opencv](https://github.com/zhangnju/opencv) branch `5.x-hip`
-- opencv_contrib HIP: [zhangnju/opencv_contrib](https://github.com/zhangnju/opencv_contrib) branch `5.x-hip` (based on jeffdaily/opencv_contrib `moat-port` + 5.x compat patches)
-- HIP core PR: [opencv/opencv#29285](https://github.com/opencv/opencv/pull/29285)
-- HIP cuda modules PR: [opencv/opencv_contrib#4147](https://github.com/opencv/opencv_contrib/pull/4147)
+- **OpenCV 5.x + HIP (core):** [zhangnju/opencv](https://github.com/zhangnju/opencv) branch `5.x-hip` — 5.x HIP compat + `GpuMat.fromDevicePointer`
+- **opencv_contrib (HIP):** [zhangnju/opencv_contrib](https://github.com/zhangnju/opencv_contrib) branch `5.x-hip-zerocopy` — `5.x-hip` (HIP port + `cv::cuda::nms` + 5.x fixes) **plus** `align_corners`; use this branch for the demo
+- **llama.cpp (zero-copy VLM server):** [zhangnju/llama.cpp](https://github.com/zhangnju/llama.cpp/tree/vlm_zerocopy) branch `vlm_zerocopy` — needed only for the `--vlm-backend llamacpp-ipc` path
+
+**Upstream pull requests:**
+
+- OpenCV core HIP: [opencv/opencv#29527](https://github.com/opencv/opencv/pull/29527) (base HIP port PR [#29285](https://github.com/opencv/opencv/pull/29285))
+- opencv_contrib HIP port + `cv::cuda::nms`: [opencv/opencv_contrib#4178](https://github.com/opencv/opencv_contrib/pull/4178) (base [#4147](https://github.com/opencv/opencv_contrib/pull/4147))
+- opencv_contrib `align_corners` resize: [opencv/opencv_contrib#4181](https://github.com/opencv/opencv_contrib/pull/4181)
